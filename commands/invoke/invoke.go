@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/ksahli/compadre/internal/core/inference"
@@ -25,6 +26,7 @@ import (
 	"github.com/ksahli/compadre/internal/core/tools"
 	"github.com/ksahli/compadre/internal/core/tools/definitions"
 	"github.com/ksahli/compadre/internal/providers/anthropic"
+	"github.com/ksahli/compadre/internal/tools/files"
 	"github.com/ksahli/compadre/internal/tools/weather"
 )
 
@@ -54,11 +56,36 @@ func (c *Command) Execute(ctx Context) error {
 		return fmt.Errorf("a message is required, pass one with -message")
 	}
 
+	root, err := workspace()
+	if err != nil {
+		return err
+	}
+
 	thread := threads.New(c.instructions, messages.New(roles.User, messages.Text(c.input)))
-	registry := definitions.New(weather.New())
+	registry := definitions.New(weather.New(), files.New(root))
 	provider := anthropic.New()
 
 	return converse(ctx, provider, registry, thread, os.Stdout)
+}
+
+// workspace is the directory the file tools may see: where the command was
+// run, resolved through symlinks once, here. Once rather than per call so that
+// every later question of whether a path is inside it compares two paths
+// nothing can still redirect. A failure here ends the command rather than
+// being handed to the model — there is no exchange yet to report it into, and
+// a process that cannot say where it is has no business offering to list it.
+func workspace() (string, error) {
+	root, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("could not determine the workspace: %w", err)
+	}
+
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("could not resolve the workspace: %w", err)
+	}
+
+	return root, nil
 }
 
 // converse runs the exchange to its end. Each turn the thread goes out, what

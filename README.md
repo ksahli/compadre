@@ -20,6 +20,9 @@ Early. What works today:
   the model has nothing left to ask for
 - a `weather` tool over Open-Meteo, the first thing in the tree to implement
   the core's tool port, and reachable by the model
+- a `list_files` tool over the directory the command was run in, confined to
+  it: an absolute path, a `..` climbing past the root and a symlink pointing
+  away are each refused rather than answered
 - unit tests over the core packages, the anthropic adapter and the loop
 
 What does not exist yet: streaming, so a reply arrives whole rather than as it
@@ -61,6 +64,17 @@ weather somewhere is answered by calling it:
 ```sh
 go run . invoke -message 'what is the weather in Paris right now?'
 ```
+
+The `list_files` tool is offered the same way, over the directory `compadre`
+was run in:
+
+```sh
+go run . invoke -message 'list the go files in this project and tell me what it does'
+```
+
+It can see that directory and nothing else. Paths are relative to it, `.git` is
+listed but never walked into, and a listing is cut off at a thousand entries
+with a line saying so.
 
 `compadre help` lists the commands, and `compadre invoke -h` the arguments
 `invoke` takes.
