@@ -9,11 +9,14 @@
 package invoke
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/ksahli/compadre/internal/core/inference"
 	"github.com/ksahli/compadre/internal/core/messages"
@@ -41,8 +44,16 @@ type Command struct {
 }
 
 // Execute assembles the exchange and runs it: the tools on offer, the
-// provider to reach the model through, and the thread to open with.
+// provider to reach the model through, and the thread to open with. An empty
+// message is refused here rather than at parsing, where an absent flag and an
+// empty one are the same thing: it is only an exchange with nothing to open it
+// that is the mistake, and it is worth saying so before a request goes out to
+// be refused by the API in words about content blocks.
 func (c *Command) Execute(ctx Context) error {
+	if strings.TrimSpace(c.input) == "" {
+		return fmt.Errorf("a message is required, pass one with -message")
+	}
+
 	thread := threads.New(c.instructions, messages.New(roles.User, messages.Text(c.input)))
 	registry := definitions.New(weather.New())
 	provider := anthropic.New()
@@ -105,14 +116,23 @@ func converse(ctx Context, provider inference.Provider, registry tools.Registry,
 // instructions, and -message for the turn to send. An argument the flag set
 // cannot make sense of comes back as an error: parsing is not the place to
 // end the process, and the caller is already reporting.
+//
+// The flag set writes into a buffer rather than to a stream of its own, for
+// the same reason. A request for help is one of the errors Parse can return,
+// and the buffer is what makes the usage it wrote available to hand back as
+// that error rather than printed from in here.
 func New(arguments []string) (*Command, error) {
 	c, f := new(Command), flag.NewFlagSet("invoke", flag.ContinueOnError)
-	f.SetOutput(io.Discard)
+	usage := &bytes.Buffer{}
+	f.SetOutput(usage)
 
 	f.StringVar(&c.instructions, "instructions", "", "system instructions")
 	f.StringVar(&c.input, "message", "", "user message")
 
 	if err := f.Parse(arguments); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil, errors.New(strings.TrimRight(usage.String(), "\n"))
+		}
 		return nil, err
 	}
 

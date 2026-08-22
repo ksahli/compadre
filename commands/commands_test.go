@@ -14,6 +14,7 @@ func TestNew(t *testing.T) {
 	}{
 		{"invoke", []string{"invoke"}},
 		{"invoke with its own flags", []string{"invoke", "-message", "hello"}},
+		{"help", []string{"help"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -53,5 +54,21 @@ func TestNewRejectsUnknownNames(t *testing.T) {
 				t.Errorf("New() error = %q, want it to name %q", err, got)
 			}
 		})
+	}
+}
+
+// TestNewRejectsNoArguments pins the precondition this package holds for
+// itself: the caller having checked the length first is not something the
+// switch below is entitled to assume.
+func TestNewRejectsNoArguments(t *testing.T) {
+	command, err := commands.New(nil)
+	if err == nil {
+		t.Fatal("New() error = nil, want an error")
+	}
+	if command != nil {
+		t.Errorf("New() = %v, want nil on error", command)
+	}
+	if got := err.Error(); !strings.Contains(got, "missing command") {
+		t.Errorf("New() error = %q, want it to mention %q", got, "missing command")
 	}
 }

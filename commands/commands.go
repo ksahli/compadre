@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/ksahli/compadre/commands/help"
 	"github.com/ksahli/compadre/commands/invoke"
 )
 
@@ -22,12 +23,19 @@ type Command interface {
 
 // New reads the command name off the front of the arguments and hands the
 // rest to whichever package owns it. An unknown name is an error, not a
-// fallback.
+// fallback, and so is no name at all: this package holds its own precondition
+// rather than trusting the caller to have checked the length first.
 func New(arguments []string) (Command, error) {
+	if len(arguments) == 0 {
+		return nil, fmt.Errorf("missing command, use compadre help for more details")
+	}
+
 	name := arguments[0]
 	switch name {
 	case "invoke":
 		return invoke.New(arguments[1:])
+	case "help":
+		return help.New(arguments[1:])
 	default:
 		err := fmt.Errorf("unknown command: '%s'", name)
 		return nil, err

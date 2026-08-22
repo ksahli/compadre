@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/ksahli/compadre/commands"
 )
@@ -16,18 +18,18 @@ import (
 // writer to complain to, and an exit code rather than a call to [os.Exit].
 // Everything the binary decides happens here, where a test can reach it.
 func run(arguments []string, stderr io.Writer) int {
-	if len(arguments) < 1 {
-		fmt.Fprintln(stderr, "missing command, use compadre help for more details")
-		return 1
-	}
-
 	command, err := commands.New(arguments)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
 
-	ctx := context.Background()
+	// An interrupt cancels the exchange rather than killing the process
+	// mid-request: the context is already threaded through every call the
+	// command makes, so there is somewhere for the signal to land.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	if err := command.Execute(ctx); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1

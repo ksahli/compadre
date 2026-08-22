@@ -77,6 +77,28 @@ func TestNew(t *testing.T) {
 	}
 }
 
+// TestNewReportsHelpAsItsUsage pins the one Parse error that is not a mistake.
+// The binary's own help points a caller here, so what comes back has to be the
+// flags this command takes and not the flag package's word for the request.
+func TestNewReportsHelpAsItsUsage(t *testing.T) {
+	for _, argument := range []string{"-h", "-help"} {
+		t.Run(argument, func(t *testing.T) {
+			command, err := New([]string{argument})
+			if err == nil {
+				t.Fatal("New() error = nil, want the usage")
+			}
+			if command != nil {
+				t.Errorf("New() = %v, want nil on error", command)
+			}
+			for _, want := range []string{"-instructions", "-message"} {
+				if got := err.Error(); !strings.Contains(got, want) {
+					t.Errorf("New() error = %q, want it to name %q", got, want)
+				}
+			}
+		})
+	}
+}
+
 // TestNewRejectsUnparseableArguments pins the half the flag set used to take
 // out of the caller's hands: an argument it cannot make sense of comes back as
 // an error, rather than ending the process from inside the parser.
@@ -97,6 +119,33 @@ func TestNewRejectsUnparseableArguments(t *testing.T) {
 			}
 			if command != nil {
 				t.Errorf("New() = %v, want nil on error", command)
+			}
+		})
+	}
+}
+
+// TestExecuteRejectsAnEmptyMessage pins what happens before a provider is
+// ever built: an exchange with nothing to open it is refused here, where the
+// caller can be told what to pass, rather than by the API in its own words.
+func TestExecuteRejectsAnEmptyMessage(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{"no message at all", ""},
+		{"a message that is only spaces", "   "},
+		{"a message that is only a newline", "\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			command := &Command{input: c.input}
+
+			err := command.Execute(context.Background())
+			if err == nil {
+				t.Fatal("Execute() error = nil, want an error")
+			}
+			if got := err.Error(); !strings.Contains(got, "-message") {
+				t.Errorf("Execute() error = %q, want it to name %q", got, "-message")
 			}
 		})
 	}
