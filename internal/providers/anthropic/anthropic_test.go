@@ -79,9 +79,15 @@ var thinking = `{"type":"thinking","thinking":"hmm","signature":"sig"}`
 // reply is a whole response: the envelope every message carries, with the
 // given content blocks inside it.
 func reply(blocks ...string) string {
+	return stopped("end_turn", blocks...)
+}
+
+// stopped is reply with the reason the model gave for stopping, which is what
+// separates a whole turn from one the adapter has to refuse.
+func stopped(reason string, blocks ...string) string {
 	return `{"id":"msg_1","type":"message","role":"assistant",` +
 		`"model":"claude-sonnet-5","content":[` + strings.Join(blocks, ",") + `],` +
-		`"stop_reason":"end_turn","stop_sequence":null,` +
+		`"stop_reason":"` + reason + `","stop_sequence":null,` +
 		`"usage":{"input_tokens":1,"output_tokens":2}}`
 }
 
@@ -492,14 +498,6 @@ func TestInvoke(t *testing.T) {
 			want:    []string{"text:a", "text:b", "text:c"},
 		},
 		{
-			// Nothing to say is no turn at all, rather than a turn
-			// that says nothing.
-			name:    "no blocks at all",
-			blocks:  nil,
-			replies: 0,
-			want:    []string{},
-		},
-		{
 			// A tool call arrives whole: the id the answer has to
 			// carry back, the tool's name, and the arguments as the
 			// model sent them.
@@ -515,14 +513,6 @@ func TestInvoke(t *testing.T) {
 			blocks:  []string{text("a"), thinking, text("b")},
 			replies: 1,
 			want:    []string{"text:a", "text:b"},
-		},
-		{
-			// And a response that is nothing but such blocks is no
-			// reply at all.
-			name:    "nothing but blocks with no shape",
-			blocks:  []string{thinking},
-			replies: 0,
-			want:    []string{},
 		},
 	}
 	for _, c := range cases {
@@ -549,6 +539,79 @@ func TestInvoke(t *testing.T) {
 
 // TestInvokeReportsFailure pins the other end: a request the API refuses comes
 // back as an error, rather than passing for an empty reply.
+// TestInvokeRefusesANonReply pins the responses the adapter will not pass on
+// as if they were answers. Each of these ends an exchange, and an exchange
+// that ends because there was nothing to read has to be told apart from one
+// that ends because the model was done.
+func TestInvokeRefusesANonReply(t *testing.T) {
+	cases := []struct {
+		name   string
+		body   string
+		reason string
+	}{
+		{
+			// Half a turn, and possibly half a tool call: the
+			// arguments of one cut off here stop mid-JSON and fail
+			// in the tool, several turns away from the cause.
+			name:   "a reply cut off at the ceiling",
+			body:   stopped("max_tokens", text("as I was say")),
+			reason: "cut off",
+		},
+		{
+			name:   "a reply the model declined to give",
+			body:   stopped("refusal", text("")),
+			reason: "declined",
+		},
+		{
+			name:   "a thread that no longer fits",
+			body:   stopped("model_context_window_exceeded"),
+			reason: "context window",
+		},
+		{
+			// Nothing to say is no turn at all, rather than a turn
+			// that says nothing.
+			name:   "no blocks at all",
+			body:   reply(),
+			reason: "nothing to read",
+		},
+		{
+			// A response that is nothing but blocks this mapping
+			// has no shape for is likewise no reply.
+			name:   "nothing but blocks with no shape",
+			body:   reply(thinking),
+			reason: "nothing to read",
+		},
+		{
+			// A paused turn is the exchange still going, not the
+			// end of it, and stopping quietly here would read as
+			// the model having finished.
+			name:   "a paused turn carrying nothing",
+			body:   stopped("pause_turn"),
+			reason: "nothing to read",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, calls, options := stub(t, c.body)
+
+			thread := threads.New("", messages.New(roles.User, messages.Text("hello")))
+			replies, err := anthropic.New(options...).Invoke(context.Background(), thread, nil)
+			if err == nil {
+				t.Fatalf("Invoke() error = nil, want an error")
+			}
+			if !strings.Contains(err.Error(), c.reason) {
+				t.Errorf("Invoke() error = %q, want it to mention %q", err, c.reason)
+			}
+			if len(replies) != 0 {
+				t.Errorf("replies = %q, want none", contents(replies))
+			}
+			if *calls != 1 {
+				t.Errorf("server was asked %d times, want 1", *calls)
+			}
+		})
+	}
+}
+
 func TestInvokeReportsFailure(t *testing.T) {
 	options := failing(t)
 

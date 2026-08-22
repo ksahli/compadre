@@ -2,6 +2,8 @@ package anthropic
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"slices"
 	"strings"
 
@@ -143,7 +145,8 @@ type provider struct {
 // tool call arrives whole — id, name and the arguments as the model sent
 // them, which is what pairs the answer with the call later. A block this
 // mapping has no shape for is skipped rather than guessed at, and a response
-// with nothing left after that is no reply at all.
+// with nothing left after that is no message at all — which [provider.Invoke]
+// reports as an error, since it is the one holding an error return.
 func reply(response *sdk.Message) []messages.Type {
 	content := []messages.Content{}
 	for _, block := range response.Content {
@@ -164,18 +167,49 @@ func reply(response *sdk.Message) []messages.Type {
 	return []messages.Type{messages.New(roles.Assistant, content...)}
 }
 
+// refused reports why a response is not an answer, or nil where it is one.
+// The API says how the model came to stop, and three of those reasons mean
+// what came back is not a reply the caller can act on: a turn cut off at the
+// ceiling is half a sentence, and half a tool call is worse — arguments that
+// stop mid-JSON go on to fail in the tool. The core has no vocabulary for a
+// stop reason and should not grow one, so the reason is read here and spent
+// here, as the error the port already allows.
+func refused(response *sdk.Message) error {
+	switch response.StopReason {
+	case sdk.StopReasonMaxTokens:
+		return errors.New("the model's reply was cut off at the token ceiling")
+	case sdk.StopReasonRefusal:
+		return errors.New("the model declined to answer")
+	case sdk.StopReasonModelContextWindowExceeded:
+		return errors.New("the exchange no longer fits in the model's context window")
+	default:
+		return nil
+	}
+}
+
 // Invoke implements [inference.Provider]. One round trip: the thread and the
 // tools on offer go out as request parameters, and the reply comes back whole
 // — including a request to run one of those tools, which is content like any
 // other and the caller's to act on. A request the API refuses comes back as an
-// error rather than as an empty reply.
+// error rather than as an empty reply, and so does a response that is no reply:
+// one the model stopped short of finishing, and one carrying nothing this
+// adapter has a shape for. Ending an exchange silently and ending it well look
+// the same to a caller, which is reason enough not to let the first happen.
 func (p *provider) Invoke(ctx Context, thread threads.Type, registry tools.Registry) ([]messages.Type, error) {
 	response, err := p.client.Messages.New(ctx, parameters(thread, registry))
 	if err != nil {
 		return nil, err
 	}
+	if err := refused(response); err != nil {
+		return nil, err
+	}
 
-	return reply(response), nil
+	replies := reply(response)
+	if len(replies) == 0 {
+		return nil, fmt.Errorf("the model answered with nothing to read (stopped: %s)", response.StopReason)
+	}
+
+	return replies, nil
 }
 
 // New builds an adapter over the Anthropic Messages API. It returns the

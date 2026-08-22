@@ -65,7 +65,9 @@ go run . invoke -message 'what is the weather in Paris right now?'
 The model and token ceiling are fixed in the Anthropic adapter for now, and the
 tools on offer are fixed in the `invoke` command; none is reachable from the
 command line. An exchange is bounded at ten turns, so a model that keeps asking
-for tools is stopped rather than left to spend.
+for tools is stopped rather than left to spend. A reply the model stopped short
+of finishing — cut off at the token ceiling, declined, or out of context — is an
+error rather than a half answer passed off as a whole one.
 
 ## Development
 
