@@ -313,6 +313,25 @@ func TestExecuteServiceFails(t *testing.T) {
 	}
 }
 
+// TestExecuteRefusesAnEndlessBody pins the ceiling on what the service can
+// make this process read. The body here is valid JSON and simply too long: cut
+// off at the ceiling it stops mid-value, which is a read error and not a place.
+func TestExecuteRefusesAnEndlessBody(t *testing.T) {
+	padding := strings.Repeat("a", 2<<20)
+	endless := `{"results":[{"name":"Paris","country":"France","latitude":48.85,` +
+		`"longitude":2.35,"padding":"` + padding + `"}]}`
+
+	_, options := stub(t, endless, forecast, http.StatusOK)
+
+	out, err := weather.New(options...).Execute(t.Context(), args(t, `{"location":"Paris"}`))
+	if err == nil {
+		t.Fatalf("Execute() = %q, want an error", out)
+	}
+	if got := err.Error(); !strings.Contains(got, "could not read the answer") {
+		t.Errorf("Execute() error = %q, want it to report a failed read", got)
+	}
+}
+
 // TestExecuteCancelled pins that the context reaches the request. A tool that
 // ignored it would keep a cancelled run waiting on a network it no longer
 // has any reason to be on.

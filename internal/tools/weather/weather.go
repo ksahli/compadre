@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -18,6 +19,11 @@ const (
 	forecastURL  = "https://api.open-meteo.com/v1/forecast"
 
 	timeout = 10 * time.Second
+
+	// maxBody is the ceiling on what the service is allowed to make this
+	// process read. These answers are a few kilobytes; a megabyte is room
+	// enough for any of them and short of anything that would hurt.
+	maxBody = 1 << 20
 
 	maxDays = 7 // the ceiling the schema advertises and Execute enforces
 
@@ -235,7 +241,9 @@ func (tool Tool) weather(ctx context.Context, at place, args arguments) (forecas
 
 // get runs one request and decodes the body into value. Anything other than a
 // 200 is reported by its status: the body of an error is Open-Meteo's to
-// shape, and repeating it would only put noise in front of the model.
+// shape, and repeating it would only put noise in front of the model. The body
+// is read through a ceiling — this is the one place the process consumes an
+// outside party's bytes, and how many of them there are is not its call.
 func (tool Tool) get(ctx context.Context, endpoint string, query url.Values, value any) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+query.Encode(), nil)
 	if err != nil {
@@ -251,7 +259,7 @@ func (tool Tool) get(ctx context.Context, endpoint string, query url.Values, val
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("the weather service answered %s", response.Status)
 	}
-	if err := json.NewDecoder(response.Body).Decode(value); err != nil {
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxBody)).Decode(value); err != nil {
 		return fmt.Errorf("could not read the answer: %w", err)
 	}
 

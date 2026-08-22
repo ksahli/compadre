@@ -30,6 +30,12 @@ type Type interface {
 // Map is the tools an exchange has available, looked up by name. It is what a
 // provider lists in a request and what a [use.Type] coming back is resolved
 // against.
+//
+// A registry is built once, by [New], and read from there on. Unlike the rest
+// of the core it cannot enforce that — a map hands its keys to whoever holds
+// it — so it is said here instead: writing to a registry after an exchange has
+// been given it changes what the model was told it could ask for, out from
+// under the request that told it.
 type Map map[string]Type
 
 // List contains the tools in the registry. A map has no order to hand back,
