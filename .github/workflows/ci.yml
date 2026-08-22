@@ -5,13 +5,23 @@ on:
     branches: [main]
   pull_request:
 
+# Nothing here writes anything back to the repository, so nothing here needs a
+# token that could. The default is whatever the repository settings say; this
+# says it in the workflow instead, where it is read alongside the steps it
+# applies to.
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Actions are pinned by commit rather than by tag: a tag is the author's
+      # to move, and following one means running whatever it points at today.
+      # The version each commit was is in the comment, so a bump stays legible.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           # Follow the toolchain go.mod asks for rather than pinning a version
           # here that would drift away from it.
@@ -30,6 +40,12 @@ jobs:
 
       - name: vet
         run: go vet ./...
+
+      # The dependency tree is mostly transitive and none of it is ours, so the
+      # question of whether a known hole has opened in it is not one this repo
+      # can answer by reading its own code.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
       - name: test
         run: go test ./...

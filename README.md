@@ -79,7 +79,7 @@ cancels the exchange rather than killing the process mid-request.
 go build ./... && go vet ./... && go test ./...
 ```
 
-CI runs the same three, plus `gofmt -l`.
+CI runs the same three, plus `gofmt -l` and `govulncheck`.
 
 ## License
 
