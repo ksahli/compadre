@@ -20,9 +20,9 @@ Early. What works today:
   the model has nothing left to ask for
 - a `weather` tool over Open-Meteo, the first thing in the tree to implement
   the core's tool port, and reachable by the model
-- a `list_files` tool over the directory the command was run in, confined to
-  it: an absolute path, a `..` climbing past the root and a symlink pointing
-  away are each refused rather than answered
+- `list_files` and `read_file` tools over the directory the command was run
+  in, confined to it: an absolute path, a `..` climbing past the root and a
+  symlink pointing away are each refused rather than answered
 - unit tests over the core packages, the anthropic adapter and the loop
 
 What does not exist yet: streaming, so a reply arrives whole rather than as it
@@ -65,16 +65,23 @@ weather somewhere is answered by calling it:
 go run . invoke -message 'what is the weather in Paris right now?'
 ```
 
-The `list_files` tool is offered the same way, over the directory `compadre`
-was run in:
+The `list_files` and `read_file` tools are offered the same way, over the
+directory `compadre` was run in:
 
 ```sh
 go run . invoke -message 'list the go files in this project and tell me what it does'
+go run . invoke -message 'read internal/core/tools/tools.go and explain Invoke'
 ```
 
-It can see that directory and nothing else. Paths are relative to it, `.git` is
-listed but never walked into, and a listing is cut off at a thousand entries
-with a line saying so.
+They can see that directory and nothing else. Paths are relative to it, and a
+path leading outside is refused by name rather than quietly answered about the
+root. `.git` is listed but never walked into, and never read out of.
+
+Both admit when an answer is short of the whole thing. A listing is cut off at
+a thousand entries with a line saying so. A read is cut off at two thousand
+lines or 256 KiB, and says which line to ask again from — `read_file` takes
+`offset` and `limit`, so a long file is read a window at a time. A file that is
+not text is refused rather than spent on the model's context.
 
 `compadre help` lists the commands, and `compadre invoke -h` the arguments
 `invoke` takes.

@@ -62,7 +62,7 @@ func (c *Command) Execute(ctx Context) error {
 	}
 
 	thread := threads.New(c.instructions, messages.New(roles.User, messages.Text(c.input)))
-	registry := definitions.New(weather.New(), files.New(root))
+	registry := definitions.New(weather.New(), files.NewList(root), files.NewRead(root))
 	provider := anthropic.New()
 
 	return converse(ctx, provider, registry, thread, os.Stdout)
