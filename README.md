@@ -20,9 +20,9 @@ Early. What works today:
   the model has nothing left to ask for
 - a `weather` tool over Open-Meteo, the first thing in the tree to implement
   the core's tool port, and reachable by the model
-- `list_files` and `read_file` tools over the directory the command was run
-  in, confined to it: an absolute path, a `..` climbing past the root and a
-  symlink pointing away are each refused rather than answered
+- `list_files`, `read_file` and `write_file` tools over the directory the
+  command was run in, confined to it: an absolute path, a `..` climbing past
+  the root and a symlink pointing away are each refused rather than answered
 - unit tests over the core packages, the anthropic adapter and the loop
 
 What does not exist yet: streaming, so a reply arrives whole rather than as it
@@ -65,23 +65,32 @@ weather somewhere is answered by calling it:
 go run . invoke -message 'what is the weather in Paris right now?'
 ```
 
-The `list_files` and `read_file` tools are offered the same way, over the
-directory `compadre` was run in:
+The `list_files`, `read_file` and `write_file` tools are offered the same way,
+over the directory `compadre` was run in:
 
 ```sh
 go run . invoke -message 'list the go files in this project and tell me what it does'
 go run . invoke -message 'read internal/core/tools/tools.go and explain Invoke'
+go run . invoke -message 'write a hello.go that prints hello'
 ```
 
-They can see that directory and nothing else. Paths are relative to it, and a
-path leading outside is refused by name rather than quietly answered about the
-root. `.git` is listed but never walked into, and never read out of.
+Note the third: `invoke` can now change the directory it was run in. It can
+change nothing else. Paths are relative to that directory, and one leading
+outside is refused by name rather than quietly answered about — or written
+into — the root. `.git` is listed but never walked into, never read out of and
+never written to.
 
-Both admit when an answer is short of the whole thing. A listing is cut off at
-a thousand entries with a line saying so. A read is cut off at two thousand
-lines or 256 KiB, and says which line to ask again from — `read_file` takes
-`offset` and `limit`, so a long file is read a window at a time. A file that is
-not text is refused rather than spent on the model's context.
+`write_file` creates and does not replace. A path that already exists is
+refused rather than overwritten, so a file the model wants to change is a file
+it has to write under a new name; directories on the way that do not exist are
+created. Content is capped at 256 KiB, and content that is not text is refused.
+
+The reading tools admit when an answer is short of the whole thing. A listing
+is cut off at a thousand entries with a line saying so. A read is cut off at
+two thousand lines or 256 KiB, and says which line to ask again from —
+`read_file` takes `offset` and `limit`, so a long file is read a window at a
+time. A file that is not text is refused rather than spent on the model's
+context.
 
 `compadre help` lists the commands, and `compadre invoke -h` the arguments
 `invoke` takes.

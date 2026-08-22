@@ -1,20 +1,23 @@
-// Package files lets the model see what is in the workspace: [List] names what
-// is there, [Read] shows what is in one of them.
+// Package files lets the model work over the workspace: [List] names what is
+// there, [Read] shows what is in one of them, and [Write] leaves a new one
+// behind.
 //
-// Both implement
+// All three implement
 // [github.com/ksahli/compadre/internal/core/tools/definitions.Type], and they
 // sit here rather than in core for the same reason a provider does: the core
-// says what a tool is, this package is two of them. A tool that reaches a
+// says what a tool is, this package is three of them. A tool that reaches a
 // filesystem is an adapter onto the world, no differently from one that
 // reaches a service, and the dependency points the one way the rest of the
 // tree points.
 //
-// The whole of this package is one bound. Listing a directory and reading a
-// file are the easy halves; the half worth writing down is that both answers
-// are about one rooted workspace and cannot be argued out of it. That is why
-// there are two tools in one package and not two packages: the bound is the
-// thing, it lives once on the unexported workspace type, and a second copy of
-// a containment check is a second chance to get it wrong.
+// The whole of this package is one bound. Listing a directory, reading a file
+// and writing one are the easy parts; the part worth writing down is that all
+// three are about one rooted workspace and cannot be argued out of it. That is
+// why there are three tools in one package and not three packages: the bound
+// is the thing, it lives once on the unexported workspace type, and a second
+// copy of a containment check is a second chance to get it wrong. Writing is
+// what makes that worth insisting on — a read that escapes leaks, a write that
+// escapes damages.
 //
 // Three ways out are refused by name: an absolute path, a relative one that
 // climbs past the root with '..', and a symlink whose target is elsewhere. The
@@ -26,10 +29,17 @@
 // directory, whether it is inside .git — is made on the resolved path for the
 // same reason.
 //
-// The root is a field on the workspace, set by [NewList] and [NewRead], rather
-// than something read from the process at call time. That is the seam the
-// weather tool has in its endpoints: a test hands these a
-// [testing.T.TempDir] and neither tool touches the tree it is running in. It
+// A path being written to is the one that does not exist yet, which is why
+// there are two ways in and not one: EvalSymlinks fails outright on a path
+// that is not there, so the workspace's create walks up to the deepest
+// component that does exist, resolves and judges that, and rejoins the tail it
+// is about to make. The risk it is guarding is the same one — a directory on
+// the way that is a link pointing out.
+//
+// The root is a field on the workspace, set by [NewList], [NewRead] and
+// [NewWrite], rather than something read from the process at call time. That
+// is the seam the weather tool has in its endpoints: a test hands these a
+// [testing.T.TempDir] and no tool here touches the tree it is running in. It
 // is also the honest shape — the workspace is a decision the wiring makes
 // once, and a tool that read the working directory itself would answer
 // differently depending on when it was asked. There is no option and no
@@ -52,7 +62,9 @@
 // before the walk reached anything asked about. [Read] refuses anything inside
 // it outright — no question about what a project is or does is answered by a
 // packfile, and a tool that will not list those paths has no business handing
-// one back when asked for it directly.
+// one back when asked for it directly. [Write] is refused there for the
+// stronger version of the same reason: a repository is git's to write, and a
+// model reaching into it is corrupting a thing it cannot see the whole of.
 //
 // Each tool has a ceiling, and they are the same instinct as the weather
 // tool's ceiling on a response body: how large a tree or a file this process
@@ -73,7 +85,25 @@
 // A file that is not text is refused rather than shown. Bytes that do not
 // decode cost the model context and tell it nothing, and being told plainly
 // that a file is not readable is worth more than being handed the inside of a
-// PNG.
+// PNG. [Write] refuses to lay such bytes down for the mirror of that reason: a
+// tool that will not hand them back has no business creating them.
+//
+// [Write] creates and does not replace. A path already there is refused rather
+// than overwritten, because a model that has lost track of what it wrote
+// should be told so rather than quietly taking work with it — the same
+// instinct as refusing a path out of the workspace instead of clamping it. The
+// guarantee is O_EXCL rather than a stat: the check before the open is there
+// to give the model a sentence it can act on, while the kernel is what
+// actually refuses a path that exists, including a symlink a check would have
+// called new and a plain create would have written straight through. The cost
+// of the policy is real and worth naming: nothing here can correct a file it
+// wrote, only write a different one.
+//
+// A write that fails partway takes the file with it, and everything a write
+// can be refused for is checked before anything is created. Half a file under
+// a name the model believes it wrote is worse than no file, and a directory
+// made on the way to a write that was never going to happen is a change nobody
+// asked for.
 //
 // A recursive listing does not follow symlinks. [path/filepath.WalkDir] does
 // not, and that is wanted twice over: a link out of the workspace is reported

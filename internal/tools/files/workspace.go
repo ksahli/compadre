@@ -91,3 +91,69 @@ func (w workspace) git(resolved string) bool {
 	rel := w.relative(resolved)
 	return rel == skipped || strings.HasPrefix(rel, skipped+string(filepath.Separator))
 }
+
+// create turns what the model asked to write into an absolute path inside the
+// workspace, or refuses. It is the counterpart of resolve for a path whose
+// last components do not exist yet: resolve puts everything through
+// EvalSymlinks, which fails outright on a path that is not there, and that is
+// right for reading and useless for writing.
+//
+// The judgement is still made on a resolved path, because the risk is the same
+// one: a directory on the way that is a link pointing out of the workspace. So
+// the walk goes up to the deepest component that does exist, resolves that,
+// judges it, and rejoins the tail that does not. Join has already collapsed
+// '..' lexically by then, so nothing in the tail can climb back out.
+//
+// The bool that comes back says the target itself is already there. It is the
+// caller's to judge — this package's writing tool creates and does not
+// replace, but that is policy and this is the bound.
+func (w workspace) create(path string) (string, bool, error) {
+	if filepath.IsAbs(path) {
+		return "", false, fmt.Errorf("path must be relative to the workspace, got '%s'", path)
+	}
+
+	target := filepath.Join(w.root, path)
+
+	// Lstat rather than Stat: a dangling link exists as a path, and it is
+	// the link that would be written through, not what it points at.
+	existing, missing := target, []string{}
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			// Climbed to the volume root without finding anything
+			// that exists. Nothing about this path is in the
+			// workspace.
+			return "", false, fmt.Errorf("path escapes the workspace: '%s'", path)
+		}
+		missing = append([]string{filepath.Base(existing)}, missing...)
+		existing = parent
+	}
+
+	resolved, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return "", false, fmt.Errorf("path escapes the workspace: '%s'", path)
+	}
+	if !w.contains(resolved) {
+		return "", false, fmt.Errorf("path escapes the workspace: '%s'", path)
+	}
+
+	if len(missing) == 0 {
+		return resolved, true, nil
+	}
+
+	// What exists has to be a directory for the rest to be made under it.
+	// A file with a path hung off it is a mistake worth naming rather than
+	// an mkdir failure read back out of the way.
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", false, fmt.Errorf("path escapes the workspace: '%s'", path)
+	}
+	if !info.IsDir() {
+		return "", false, fmt.Errorf("not a directory: '%s'", w.relative(resolved))
+	}
+
+	return filepath.Join(append([]string{resolved}, missing...)...), false, nil
+}
