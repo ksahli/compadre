@@ -28,6 +28,7 @@ import (
 	"github.com/ksahli/compadre/internal/providers/anthropic"
 	"github.com/ksahli/compadre/internal/tools/files"
 	"github.com/ksahli/compadre/internal/tools/weather"
+	"github.com/ksahli/compadre/internal/tools/web"
 )
 
 type (
@@ -62,7 +63,11 @@ func (c *Command) Execute(ctx Context) error {
 	}
 
 	thread := threads.New(c.instructions, messages.New(roles.User, messages.Text(c.input)))
-	registry := definitions.New(weather.New(), files.NewList(root), files.NewRead(root), files.NewWrite(root))
+	registry := definitions.New(
+		weather.New(),
+		web.New(),
+		files.NewList(root), files.NewRead(root), files.NewWrite(root),
+	)
 	provider := anthropic.New()
 
 	return converse(ctx, provider, registry, thread, os.Stdout)
