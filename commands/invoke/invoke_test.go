@@ -7,6 +7,8 @@ package invoke
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -23,6 +25,7 @@ func TestNew(t *testing.T) {
 		arguments    []string
 		instructions string
 		input        string
+		store        string
 	}{
 		{
 			name:      "no arguments leaves both empty",
@@ -43,6 +46,12 @@ func TestNew(t *testing.T) {
 			arguments:    []string{"-message", "hello", "-instructions", "be brief"},
 			instructions: "be brief",
 			input:        "hello",
+		},
+		{
+			name:      "a record kept somewhere named",
+			arguments: []string{"-message", "hello", "-store", "/tmp/exchanges.db"},
+			input:     "hello",
+			store:     "/tmp/exchanges.db",
 		},
 		{
 			name:      "an explicitly empty message",
@@ -72,6 +81,9 @@ func TestNew(t *testing.T) {
 			if command.input != c.input {
 				t.Errorf("input = %q, want %q", command.input, c.input)
 			}
+			if command.store != c.store {
+				t.Errorf("store = %q, want %q", command.store, c.store)
+			}
 		})
 	}
 }
@@ -89,7 +101,7 @@ func TestNewReportsHelpAsItsUsage(t *testing.T) {
 			if command != nil {
 				t.Errorf("New() = %v, want nil on error", command)
 			}
-			for _, want := range []string{"-instructions", "-message"} {
+			for _, want := range []string{"-instructions", "-message", "-store"} {
 				if got := err.Error(); !strings.Contains(got, want) {
 					t.Errorf("New() error = %q, want it to name %q", got, want)
 				}
@@ -209,4 +221,48 @@ func TestTranscribeAnExchangeWithNothingSaid(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRecord pins where the exchange is written. A path given on the command
+// line is taken as it is; without one, the record goes to a database of this
+// program's own under the user's config directory rather than into whatever
+// directory the caller happened to be standing in.
+func TestRecord(t *testing.T) {
+	t.Run("a path that was named", func(t *testing.T) {
+		want := filepath.Join(t.TempDir(), "somewhere.db")
+		command := &Command{input: "hello", store: want}
+
+		got, err := command.record()
+		if err != nil {
+			t.Fatalf("record() error = %v, want nil", err)
+		}
+		if got != want {
+			t.Errorf("record() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("no path at all", func(t *testing.T) {
+		// UserConfigDir reads the environment, so the test says what
+		// it should find there rather than writing to the real one.
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		command := &Command{input: "hello"}
+
+		got, err := command.record()
+		if err != nil {
+			t.Fatalf("record() error = %v, want nil", err)
+		}
+
+		config, err := os.UserConfigDir()
+		if err != nil {
+			t.Fatalf("UserConfigDir() error = %v, want nil", err)
+		}
+		if want := filepath.Join(config, "compadre", "exchanges.db"); got != want {
+			t.Errorf("record() = %q, want %q", got, want)
+		}
+		// The directory is made on the way, so that opening the store
+		// is not the thing that discovers it is not there.
+		if _, err := os.Stat(filepath.Dir(got)); err != nil {
+			t.Errorf("the directory for the record was not made: %v", err)
+		}
+	})
 }

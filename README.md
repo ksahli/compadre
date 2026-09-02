@@ -1,9 +1,10 @@
 # compadre
 
 An agent runtime in Go, built ports first: the core owns the vocabulary — roles,
-messages, threads — and reaches a model through a single interface. No model
-vendor is named anywhere inside it. Providers are adapters at the edge, and are
-the only code that knows an SDK exists.
+messages, threads — and reaches a model through one interface and its record
+through another. No model vendor and no storage engine is named anywhere inside
+it. Providers and stores are adapters at the edge, and are the only code that
+knows an SDK or a database exists.
 
 ## Status
 
@@ -26,13 +27,19 @@ Early. What works today:
   the root and a symlink pointing away are each refused rather than answered
 - a `http_get` tool that fetches a page and hands back the text of it, over
   https only and only to addresses on the open internet
-- unit tests over the core packages, the anthropic adapter and the loop
+- a record of every exchange, kept in SQLite as it happens: a `memory.Store`
+  port in the core and an adapter behind it, written to after every turn rather
+  than once at the end, so a run that was refused or interrupted still left the
+  turns that got that far
+- unit tests over the core packages, the anthropic adapter, the loop and the
+  store
 
 What does not exist yet: streaming, so an exchange arrives whole when it ends
 rather than a word or a turn at a time — a run in which the model calls several
 tools is silent until the last of them is done; any way to choose the model, the
-token ceiling or the tools from the command line; and any memory of an exchange
-once the command exits.
+token ceiling or the tools from the command line; and any way to pick a stored
+exchange back up from the command line, though the store can already read one
+back.
 
 ## Layout
 
@@ -42,14 +49,17 @@ internal/core/roles      the parts a message can take
 internal/core/messages   message primitives
 internal/core/threads    the exchange a provider is asked to continue
 internal/core/inference  the port a model is reached through
+internal/core/exchanges  a thread and the id it is filed under
+internal/core/memory     the port an exchange is kept through
 internal/core/tools      what a tool is, in the core's own terms
 internal/core/agents     the loop that runs an exchange to its end
-internal/providers/…     adapters implementing that port
+internal/providers/…     adapters implementing the inference port
+internal/stores/…        adapters implementing the memory port
 internal/tools/…         tools that are, one package each
 ```
 
-Dependencies point one way: `providers` and `tools` know `core`, never the
-reverse, and `core` names no vendor or service.
+Dependencies point one way: `providers`, `stores` and `tools` know `core`, never
+the reverse, and `core` names no vendor, service or engine.
 
 ## Usage
 
@@ -104,6 +114,30 @@ two thousand lines or 256 KiB, and says which line to ask again from —
 `read_file` takes `offset` and `limit`, so a long file is read a window at a
 time. A file that is not text is refused rather than spent on the model's
 context.
+
+Every exchange is written down as it happens, into a SQLite database under the
+user's config directory — `~/.config/compadre/exchanges.db` on Linux. `-store`
+points somewhere else:
+
+```sh
+go run . invoke -store ./exchanges.db -message 'why is the sky blue?'
+```
+
+The id the exchange was filed under is printed to stderr when the run ends, so
+stdout stays what the model said and nothing else. The record is written after
+every turn rather than once at the end, which means a run that was refused
+half way through, or interrupted, still left behind the turns that got that
+far. Its three tables are the vocabulary itself — a thread, its turns, and the
+blocks of each turn — so what the model reached for is a question the record
+can answer:
+
+```sh
+sqlite3 ~/.config/compadre/exchanges.db \
+  "SELECT tool, count(*) FROM contents WHERE kind = 'use' GROUP BY tool"
+```
+
+No command reads one back yet — the store can, but nothing on the command line
+asks it to. Picking an exchange up and continuing it is the next thing.
 
 `compadre help` lists the commands, and `compadre invoke -h` the arguments
 `invoke` takes.

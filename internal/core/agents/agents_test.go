@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ksahli/compadre/internal/core/agents"
+	"github.com/ksahli/compadre/internal/core/exchanges"
 	"github.com/ksahli/compadre/internal/core/messages"
 	"github.com/ksahli/compadre/internal/core/roles"
 	"github.com/ksahli/compadre/internal/core/threads"
@@ -61,6 +62,42 @@ func (t tool) Execute(context.Context, use.Arguments) (string, error) {
 	return t.answer, t.err
 }
 
+// recorder stands in for a store. It keeps a rendering of every exchange it
+// was asked to write, so that a case can say what the record looked like at
+// each point rather than only at the end, and it files the first exchange it
+// sees under an id of its own so that carrying that id forward can be pinned.
+// It can be told to fail on the nth write.
+type recorder struct {
+	id     string
+	fail   error
+	failOn int
+	saves  []string
+	filed  []string
+}
+
+func (r *recorder) Save(_ context.Context, exchange exchanges.Type) (exchanges.Type, error) {
+	r.filed = append(r.filed, exchange.ID())
+	r.saves = append(r.saves, strings.Join(record(exchange.Thread()), " "))
+
+	if r.fail != nil && len(r.saves) >= r.failOn {
+		return exchange, r.fail
+	}
+
+	if exchange.ID() == "" {
+		exchange = exchanges.New(r.id, exchange.Thread())
+	}
+	return exchange, nil
+}
+
+func (r *recorder) Load(context.Context, string) (exchanges.Type, error) {
+	return exchanges.Type{}, errors.New("not asked for here")
+}
+
+func (r *recorder) writes() int { return len(r.saves) }
+
+// store is a recorder that files what it is given under "7".
+func store() *recorder { return &recorder{id: "7"} }
+
 // said renders one content block as a line a case can state, naming the shape
 // it turned out to be.
 func said(content messages.Content) string {
@@ -107,6 +144,11 @@ func asks(id, name string) []messages.Type {
 
 func opening() threads.Type {
 	return threads.New("", messages.New(roles.User, messages.Text("hello")))
+}
+
+// unfiled is the exchange a caller opens with: a thread and no id yet.
+func unfiled() exchanges.Type {
+	return exchanges.Open(opening())
 }
 
 func registry() tools.Registry {
@@ -202,9 +244,9 @@ func TestConverse(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			provider := &model{replies: c.replies}
+			provider, kept := &model{replies: c.replies}, store()
 
-			finished, err := agents.New(provider, registry()).Converse(context.Background(), opening())
+			finished, err := agents.New(provider, registry(), kept).Converse(context.Background(), unfiled())
 			if err != nil {
 				t.Fatalf("Converse() error = %v, want nil", err)
 			}
@@ -214,8 +256,13 @@ func TestConverse(t *testing.T) {
 			}
 			// The thread that comes back is the whole exchange,
 			// which is the reason it comes back at all.
-			if got := record(finished); !slices.Equal(got, c.thread) {
+			if got := record(finished.Thread()); !slices.Equal(got, c.thread) {
 				t.Errorf("thread = %v, want %v", got, c.thread)
+			}
+			// And what was written down last is the same thing:
+			// the record the run leaves behind is the run.
+			if got, want := kept.saves[len(kept.saves)-1], strings.Join(c.thread, " "); got != want {
+				t.Errorf("last write = %q, want %q", got, want)
 			}
 		})
 	}
@@ -226,14 +273,19 @@ func TestConverse(t *testing.T) {
 // returns the thread that follows: a caller still holding the one it opened
 // with has to find it as it was.
 func TestConverseLeavesTheOpeningThreadAlone(t *testing.T) {
-	provider, thread := &model{replies: [][]messages.Type{says("hola")}}, opening()
+	provider, opened := &model{replies: [][]messages.Type{says("hola")}}, unfiled()
 
-	if _, err := agents.New(provider, registry()).Converse(context.Background(), thread); err != nil {
+	if _, err := agents.New(provider, registry(), store()).Converse(context.Background(), opened); err != nil {
 		t.Fatalf("Converse() error = %v, want nil", err)
 	}
 
-	if got, want := record(thread), []string{"User(text:hello)"}; !slices.Equal(got, want) {
+	if got, want := record(opened.Thread()), []string{"User(text:hello)"}; !slices.Equal(got, want) {
 		t.Errorf("the opening thread = %v, want %v", got, want)
+	}
+	// The id the store gave the exchange is on what came back, not on
+	// what the caller still holds.
+	if got := opened.ID(); got != "" {
+		t.Errorf("the opening exchange was filed under %q, want it left unfiled", got)
 	}
 }
 
@@ -242,7 +294,7 @@ func TestConverseLeavesTheOpeningThreadAlone(t *testing.T) {
 func TestConverseStopsAtTheCeiling(t *testing.T) {
 	provider := &model{replies: [][]messages.Type{asks("toolu_1", "works")}}
 
-	_, err := agents.New(provider, registry()).Converse(context.Background(), opening())
+	_, err := agents.New(provider, registry(), store()).Converse(context.Background(), unfiled())
 	if err == nil {
 		t.Fatal("Converse() error = nil, want an error")
 	}
@@ -257,7 +309,7 @@ func TestConverseReportsFailure(t *testing.T) {
 	refused := errors.New("refused")
 	provider := &model{err: refused}
 
-	_, err := agents.New(provider, registry()).Converse(context.Background(), opening())
+	_, err := agents.New(provider, registry(), store()).Converse(context.Background(), unfiled())
 	if !errors.Is(err, refused) {
 		t.Fatalf("Converse() error = %v, want %v", err, refused)
 	}
@@ -272,19 +324,23 @@ func TestConverseReportsFailure(t *testing.T) {
 // than losing everything said before the thing that went wrong.
 func TestConverseReturnsWhatItHadWhenItStopped(t *testing.T) {
 	t.Run("a provider that refused", func(t *testing.T) {
-		provider := &model{err: errors.New("refused")}
+		provider, kept := &model{err: errors.New("refused")}, store()
 
-		finished, err := agents.New(provider, registry()).Converse(context.Background(), opening())
+		finished, err := agents.New(provider, registry(), kept).Converse(context.Background(), unfiled())
 		if err == nil {
 			t.Fatal("Converse() error = nil, want an error")
 		}
-		if finished == nil {
-			t.Fatal("Converse() thread = nil, want the exchange as it stood")
-		}
 		// Nothing was said before the refusal, so the exchange is the
-		// turn that opened it and no more.
-		if got, want := record(finished), []string{"User(text:hello)"}; !slices.Equal(got, want) {
+		// turn that opened it and no more — and that turn was written
+		// down before the model was asked, so the record holds it too.
+		if got, want := record(finished.Thread()), []string{"User(text:hello)"}; !slices.Equal(got, want) {
 			t.Errorf("thread = %v, want %v", got, want)
+		}
+		if got := finished.ID(); got != "7" {
+			t.Errorf("Type.ID() = %q, want %q", got, "7")
+		}
+		if got, want := kept.saves, []string{"User(text:hello)"}; !slices.Equal(got, want) {
+			t.Errorf("writes = %v, want %v", got, want)
 		}
 	})
 
@@ -298,20 +354,17 @@ func TestConverseReturnsWhatItHadWhenItStopped(t *testing.T) {
 			)},
 		}}
 
-		finished, err := agents.New(provider, registry()).Converse(context.Background(), opening())
+		finished, err := agents.New(provider, registry(), store()).Converse(context.Background(), unfiled())
 		if err == nil {
 			t.Fatal("Converse() error = nil, want an error")
-		}
-		if finished == nil {
-			t.Fatal("Converse() thread = nil, want the exchange as it stood")
 		}
 
 		// The opening turn, then a call and its answer for every turn
 		// the ceiling allowed.
-		if got, want := len(finished.Messages()), 1+2*agents.Turns; got != want {
+		if got, want := len(finished.Thread().Messages()), 1+2*agents.Turns; got != want {
 			t.Errorf("thread holds %d messages, want %d", got, want)
 		}
-		if got := record(finished); !strings.Contains(strings.Join(got, "\n"), "text:here we go") {
+		if got := record(finished.Thread()); !strings.Contains(strings.Join(got, "\n"), "text:here we go") {
 			t.Errorf("thread = %v, want it to hold what was said before the ceiling", got)
 		}
 	})
@@ -322,14 +375,113 @@ func TestConverseReturnsWhatItHadWhenItStopped(t *testing.T) {
 func TestConverseWithNoTools(t *testing.T) {
 	provider := &model{replies: [][]messages.Type{says("hola")}}
 
-	finished, err := agents.New(provider, definitions.New()).Converse(context.Background(), opening())
+	finished, err := agents.New(provider, definitions.New(), store()).Converse(context.Background(), unfiled())
 	if err != nil {
 		t.Fatalf("Converse() error = %v, want nil", err)
 	}
 	if provider.calls() != 1 {
 		t.Errorf("provider was asked %d times, want 1", provider.calls())
 	}
-	if got, want := record(finished), []string{"User(text:hello)", "Assistant(text:hola)"}; !slices.Equal(got, want) {
+	if got, want := record(finished.Thread()), []string{"User(text:hello)", "Assistant(text:hola)"}; !slices.Equal(got, want) {
 		t.Errorf("thread = %v, want %v", got, want)
 	}
+}
+
+// TestConverseWritesTheExchangeDownAsItHappens pins where the writes fall. The
+// point of writing each turn rather than the whole run at the end is that the
+// record is true at every moment, so what is pinned here is the sequence: the
+// opening turn before the model is asked anything, then the model's turn, then
+// the answers to it — never a result on disk with no call ahead of it.
+func TestConverseWritesTheExchangeDownAsItHappens(t *testing.T) {
+	provider, kept := &model{replies: [][]messages.Type{
+		asks("toolu_1", "works"),
+		says("hola"),
+	}}, store()
+
+	if _, err := agents.New(provider, registry(), kept).Converse(context.Background(), unfiled()); err != nil {
+		t.Fatalf("Converse() error = %v, want nil", err)
+	}
+
+	want := []string{
+		"User(text:hello)",
+		"User(text:hello) Assistant(use:toolu_1:works)",
+		"User(text:hello) Assistant(use:toolu_1:works) User(result:toolu_1:ok:the answer)",
+		"User(text:hello) Assistant(use:toolu_1:works) User(result:toolu_1:ok:the answer) Assistant(text:hola)",
+	}
+	if got := kept.saves; !slices.Equal(got, want) {
+		t.Errorf("writes = %v, want %v", got, want)
+	}
+}
+
+// TestConverseCarriesTheIDTheStoreGaveIt pins the point of Save handing an
+// exchange back. The opening write is what mints the id, and every write after
+// it is filed under that one rather than opening a second exchange.
+func TestConverseCarriesTheIDTheStoreGaveIt(t *testing.T) {
+	provider, kept := &model{replies: [][]messages.Type{
+		asks("toolu_1", "works"),
+		says("hola"),
+	}}, store()
+
+	finished, err := agents.New(provider, registry(), kept).Converse(context.Background(), unfiled())
+	if err != nil {
+		t.Fatalf("Converse() error = %v, want nil", err)
+	}
+
+	// The first write arrived unfiled, and every one after it under the id
+	// the store answered with.
+	if got, want := kept.filed, []string{"", "7", "7", "7"}; !slices.Equal(got, want) {
+		t.Errorf("ids written under = %v, want %v", got, want)
+	}
+	if got := finished.ID(); got != "7" {
+		t.Errorf("Type.ID() = %q, want %q", got, "7")
+	}
+}
+
+// TestConverseStopsWhenTheRecordCannotBeKept pins the one failure treated
+// unlike a tool's. A tool that failed is a result the model recovers from; a
+// record that is not being kept is not something it can do anything about, so
+// the run ends rather than spending on turns nobody will read back. What was
+// said still comes back, because it was still said.
+func TestConverseStopsWhenTheRecordCannotBeKept(t *testing.T) {
+	full := errors.New("the disk is full")
+
+	t.Run("on the opening write", func(t *testing.T) {
+		provider := &model{replies: [][]messages.Type{says("hola")}}
+		kept := &recorder{id: "7", fail: full, failOn: 1}
+
+		finished, err := agents.New(provider, registry(), kept).Converse(context.Background(), unfiled())
+		if !errors.Is(err, full) {
+			t.Fatalf("Converse() error = %v, want %v", err, full)
+		}
+		// The model was never asked: there was nowhere to put the
+		// answer before there was a question to spend on.
+		if provider.calls() != 0 {
+			t.Errorf("provider was asked %d times, want 0", provider.calls())
+		}
+		if got, want := record(finished.Thread()), []string{"User(text:hello)"}; !slices.Equal(got, want) {
+			t.Errorf("thread = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("part way through", func(t *testing.T) {
+		provider := &model{replies: [][]messages.Type{
+			asks("toolu_1", "works"),
+			says("hola"),
+		}}
+		kept := &recorder{id: "7", fail: full, failOn: 2}
+
+		finished, err := agents.New(provider, registry(), kept).Converse(context.Background(), unfiled())
+		if !errors.Is(err, full) {
+			t.Fatalf("Converse() error = %v, want %v", err, full)
+		}
+		if kept.writes() != 2 {
+			t.Errorf("the store was asked to write %d times, want 2", kept.writes())
+		}
+		// The turn that could not be written is still what was said,
+		// and comes back with the rest of it.
+		want := []string{"User(text:hello)", "Assistant(use:toolu_1:works)"}
+		if got := record(finished.Thread()); !slices.Equal(got, want) {
+			t.Errorf("thread = %v, want %v", got, want)
+		}
+	})
 }
