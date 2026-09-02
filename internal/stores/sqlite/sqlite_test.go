@@ -197,6 +197,57 @@ func TestSaveAppendsRatherThanRewrites(t *testing.T) {
 	}
 }
 
+// TestSaveOfAnExchangeThatWasLoaded pins the round trip a resumed run is: an
+// exchange read back out of the store, grown by a turn, and written down
+// again. It is not the same as appending to an exchange still in hand, which
+// TestSaveAppendsRatherThanRewrites covers — here the count of what is already
+// filed has to be arrived at from the id alone, and getting it wrong would
+// write the whole conversation down a second time under the same thread.
+func TestSaveOfAnExchangeThatWasLoaded(t *testing.T) {
+	store, ctx := open(t), context.Background()
+
+	saved, err := store.Save(ctx, exchanges.Open(threads.New("be brief",
+		messages.New(roles.User, messages.Text("why is the sky blue?")),
+		messages.New(roles.Assistant, messages.Text("rayleigh scattering")),
+	)))
+	if err != nil {
+		t.Fatalf("Save() error = %v, want nil", err)
+	}
+
+	loaded, err := store.Load(ctx, saved.ID())
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+
+	resumed, err := store.Save(ctx, loaded.With(loaded.Thread().Append(
+		messages.New(roles.User, messages.Text("and at sunset?")))))
+	if err != nil {
+		t.Fatalf("Save() error = %v, want nil", err)
+	}
+	if got := resumed.ID(); got != saved.ID() {
+		t.Errorf("Type.ID() = %q, want %q — resuming opened a second exchange", got, saved.ID())
+	}
+
+	again, err := store.Load(ctx, saved.ID())
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	want := []string{
+		"User(text:why is the sky blue?)",
+		"Assistant(text:rayleigh scattering)",
+		"User(text:and at sunset?)",
+	}
+	if got := record(again.Thread()); !slices.Equal(got, want) {
+		t.Errorf("thread = %v, want %v", got, want)
+	}
+	// The instructions are not a turn, so nothing appends them: they have
+	// to have survived the trip out and back rather than been written down
+	// again or lost.
+	if got, want := again.Thread().Instructions(), "be brief"; got != want {
+		t.Errorf("Thread.Instructions() = %q, want %q", got, want)
+	}
+}
+
 // TestSaveOfAnExchangeThatShrank pins the refusal. A thread shorter than what
 // is filed under it is not one that grew, and the store has no business
 // guessing which of the two is the record.

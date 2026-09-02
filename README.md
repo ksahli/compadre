@@ -31,15 +31,17 @@ Early. What works today:
   port in the core and an adapter behind it, written to after every turn rather
   than once at the end, so a run that was refused or interrupted still left the
   turns that got that far
+- picking one of those back up: `invoke -exchange <id>` reads the exchange out
+  of the store and carries it on rather than opening a new one, and what it
+  says goes down under the same id
 - unit tests over the core packages, the anthropic adapter, the loop and the
   store
 
 What does not exist yet: streaming, so an exchange arrives whole when it ends
 rather than a word or a turn at a time — a run in which the model calls several
 tools is silent until the last of them is done; any way to choose the model, the
-token ceiling or the tools from the command line; and any way to pick a stored
-exchange back up from the command line, though the store can already read one
-back.
+token ceiling or the tools from the command line; and any way to find a stored
+exchange from the command line, which is still a question for `sqlite3`.
 
 ## Layout
 
@@ -136,8 +138,27 @@ sqlite3 ~/.config/compadre/exchanges.db \
   "SELECT tool, count(*) FROM contents WHERE kind = 'use' GROUP BY tool"
 ```
 
-No command reads one back yet — the store can, but nothing on the command line
-asks it to. Picking an exchange up and continuing it is the next thing.
+That id is also how an exchange is picked back up:
+
+```sh
+go run . invoke -message 'why is the sky blue?'
+# exchange 7 in /home/you/.config/compadre/exchanges.db
+go run . invoke -exchange 7 -message 'and at sunset?'
+```
+
+A resumed run is the same run: the thread is read back out of the store, the
+message is folded onto the end of it, and what follows is written down under
+the same id rather than opening a second conversation. What goes to stdout is
+what was said this time — the turns already there were read once already, and
+the record has them either way. The instructions belong to the exchange that
+opened, so `-instructions` alongside `-exchange` is refused rather than quietly
+dropped, and an id nothing was filed under ends the run rather than opening a
+fresh exchange under a name the caller did not choose. An exchange that ended
+badly can be picked up like any other, which is part of what writing after
+every turn is for.
+
+Finding an exchange is still a question for `sqlite3`; nothing on the command
+line lists them.
 
 `compadre help` lists the commands, and `compadre invoke -h` the arguments
 `invoke` takes.
