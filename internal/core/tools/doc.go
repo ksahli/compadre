@@ -29,9 +29,14 @@
 // and a [Result] as content, so a call can be read off a reply and an answer
 // folded back into a thread — but reading a reply, calling [Invoke] on what it
 // finds and asking the model again belongs above this package rather than in
-// it. The command in [github.com/ksahli/compadre/commands/invoke] is where
-// that happens, because deciding how long an exchange may run and which tools
-// it may reach for is the wiring's call, not the vocabulary's.
+// it. [github.com/ksahli/compadre/internal/core/agents] is where that happens.
+//
+// The line between the two is worth stating, because it is not the line
+// between the core and its wiring. How an exchange proceeds is the runtime's
+// own behaviour and lives in the core beside this vocabulary; which tools an
+// exchange may reach for is the wiring's call, and reaches the agent as an
+// argument. So the vocabulary does not run the loop, and the loop does not
+// choose the tools.
 //
 // The types the subpackages own are re-exported here as aliases (Use,
 // Definition, Result, Registry) so that code depending on a tool need not

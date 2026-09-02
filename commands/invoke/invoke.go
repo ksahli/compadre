@@ -3,9 +3,15 @@
 //
 // This is where a provider is chosen and the tools it may offer are
 // assembled, which makes it the wiring — the other half of the pair that
-// knows an adapter exists. It is also where the loop lives: a reply that asks
-// for a tool is run, answered, and sent back, until the model has nothing
-// left to ask for.
+// knows an adapter exists. It assembles those, opens a thread with the message
+// it was given, and hands all three to an agent; running the exchange is
+// [github.com/ksahli/compadre/internal/core/agents]'s work, not a command's.
+//
+// What is left here is the half that is genuinely a command's: choosing the
+// provider, deciding which tools are on offer and what root the file ones may
+// see, and printing. The agent hands back the exchange rather than writing it
+// anywhere, so the words reach a reader only because this package puts them
+// there.
 package invoke
 
 import (
@@ -19,11 +25,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ksahli/compadre/internal/core/inference"
+	"github.com/ksahli/compadre/internal/core/agents"
 	"github.com/ksahli/compadre/internal/core/messages"
 	"github.com/ksahli/compadre/internal/core/roles"
 	"github.com/ksahli/compadre/internal/core/threads"
-	"github.com/ksahli/compadre/internal/core/tools"
 	"github.com/ksahli/compadre/internal/core/tools/definitions"
 	"github.com/ksahli/compadre/internal/providers/anthropic"
 	"github.com/ksahli/compadre/internal/tools/files"
@@ -34,10 +39,6 @@ import (
 type (
 	Context = context.Context
 )
-
-// turns is the ceiling on one exchange. A model that keeps asking for tools
-// would otherwise spend without end, and stopping loudly is better than that.
-const turns = 10
 
 // Command is a parsed invoke: the instructions to stand over the exchange,
 // and the message to open it with.
@@ -70,7 +71,35 @@ func (c *Command) Execute(ctx Context) error {
 	)
 	provider := anthropic.New()
 
-	return converse(ctx, provider, registry, thread, os.Stdout)
+	// The exchange comes back whether it ended well or badly, so what was
+	// said is printed either way: a run that failed on its fourth turn
+	// still said three turns' worth of things, and losing those would be
+	// reporting the failure by throwing away the answer.
+	finished, err := agents.New(provider, registry).Converse(ctx, thread)
+	transcribe(os.Stdout, finished)
+
+	return err
+}
+
+// transcribe prints what the model said, and only that.
+//
+// Two things are left out, and for different reasons. A tool call and its
+// answer are the exchange's business rather than the reader's — they are how
+// the answer was arrived at, not the answer. And the turn that opened the
+// exchange is the caller's own message, which they do not need read back to
+// them; skipping every role but the assistant's is what settles both the first
+// case and any later user turn the loop folded in.
+func transcribe(out io.Writer, thread threads.Type) {
+	for _, message := range thread.Messages() {
+		if message.Role() != roles.Assistant {
+			continue
+		}
+		for _, content := range message.Content() {
+			if text, ok := content.Text(); ok {
+				fmt.Fprintln(out, text)
+			}
+		}
+	}
 }
 
 // workspace is the directory the file tools may see: where the command was
@@ -91,57 +120,6 @@ func workspace() (string, error) {
 	}
 
 	return root, nil
-}
-
-// converse runs the exchange to its end. Each turn the thread goes out, what
-// the model said is printed, and its replies are folded back in; anything it
-// asked for is run and answered in one message, and round again. The model
-// asking for nothing is the end of it. The first error ends the run, and
-// nothing of that turn is printed ahead of it: a reply that failed is not a
-// reply. Only text is printed — a tool call and its answer are the exchange's
-// business, not the reader's.
-//
-// It takes its provider, its tools and its writer rather than reaching for
-// them, so that the loop can be run without a model at the other end.
-func converse(ctx Context, provider inference.Provider, registry tools.Registry, thread threads.Type, out io.Writer) error {
-	for range turns {
-		replies, err := provider.Invoke(ctx, thread, registry)
-		if err != nil {
-			return err
-		}
-
-		requests := []tools.Use{}
-		for _, reply := range replies {
-			for _, content := range reply.Content() {
-				if text, ok := content.Text(); ok {
-					fmt.Fprintln(out, text)
-				}
-				if use, ok := content.Use(); ok {
-					requests = append(requests, use)
-				}
-			}
-		}
-
-		// The model's turn has to be in the record before the
-		// answers to it are: a result with no call ahead of it is
-		// not something the model can read.
-		thread = thread.Append(replies...)
-
-		if len(requests) == 0 {
-			return nil
-		}
-
-		answers := []messages.Content{}
-		for _, request := range requests {
-			// Invoke does not fail: a tool that did is a result
-			// the model reads and recovers from.
-			result := tools.Invoke(ctx, request, registry)
-			answers = append(answers, messages.Result(result))
-		}
-		thread = thread.Append(messages.New(roles.User, answers...))
-	}
-
-	return fmt.Errorf("gave up after %d turns: the model kept asking for tools", turns)
 }
 
 // New parses the arguments invoke understands: -instructions for the system

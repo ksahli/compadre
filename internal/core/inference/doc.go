@@ -7,9 +7,11 @@
 //
 // The port is deliberately narrow. Give it a thread and the tools the model
 // may ask for, get the replies back whole: one round trip, no loop, and the
-// replies are not folded back into the thread — that is the caller's call.
-// What a provider does with the thread's instructions is the provider's
-// business; each API wants them somewhere different.
+// replies are not folded back into the thread — that is the caller's call, and
+// [github.com/ksahli/compadre/internal/core/agents] is the caller that makes
+// it, turning round trips into an exchange. What a provider does with the
+// thread's instructions is the provider's business; each API wants them
+// somewhere different.
 //
 // The registry is an argument rather than something a provider is built with,
 // because what a model may reach for belongs to the exchange, not to the

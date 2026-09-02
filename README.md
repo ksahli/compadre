@@ -15,19 +15,24 @@ Early. What works today:
   ask for, get its replies back whole
 - an Anthropic adapter over the Messages API, mapping turns in both directions
   — what was said, a tool the model asks for, and the answer to one
-- tool use end to end: the `invoke` command gathers a registry, hands it to the
-  provider, runs whatever the model asks for and sends the results back, until
-  the model has nothing left to ask for
+- tool use end to end: an `agents` package in the core runs the exchange —
+  whatever the model asks for is run and answered, and the exchange goes on
+  until it has nothing left to ask for; the `invoke` command gathers the
+  registry, hands it over, and prints what was said
 - a `weather` tool over Open-Meteo, the first thing in the tree to implement
   the core's tool port, and reachable by the model
 - `list_files`, `read_file` and `write_file` tools over the directory the
   command was run in, confined to it: an absolute path, a `..` climbing past
   the root and a symlink pointing away are each refused rather than answered
+- a `http_get` tool that fetches a page and hands back the text of it, over
+  https only and only to addresses on the open internet
 - unit tests over the core packages, the anthropic adapter and the loop
 
-What does not exist yet: streaming, so a reply arrives whole rather than as it
-is written; any way to choose the model, the token ceiling or the tools from
-the command line; and any memory of an exchange once the command exits.
+What does not exist yet: streaming, so an exchange arrives whole when it ends
+rather than a word or a turn at a time — a run in which the model calls several
+tools is silent until the last of them is done; any way to choose the model, the
+token ceiling or the tools from the command line; and any memory of an exchange
+once the command exits.
 
 ## Layout
 
@@ -38,6 +43,7 @@ internal/core/messages   message primitives
 internal/core/threads    the exchange a provider is asked to continue
 internal/core/inference  the port a model is reached through
 internal/core/tools      what a tool is, in the core's own terms
+internal/core/agents     the loop that runs an exchange to its end
 internal/providers/…     adapters implementing that port
 internal/tools/…         tools that are, one package each
 ```
@@ -63,6 +69,13 @@ weather somewhere is answered by calling it:
 
 ```sh
 go run . invoke -message 'what is the weather in Paris right now?'
+```
+
+The `http_get` tool is offered the same way, for reading a page the model is
+pointed at:
+
+```sh
+go run . invoke -message 'read https://go.dev/doc/effective_go and summarise the section on errors'
 ```
 
 The `list_files`, `read_file` and `write_file` tools are offered the same way,
