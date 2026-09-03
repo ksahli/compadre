@@ -34,14 +34,18 @@ Early. What works today:
 - picking one of those back up: `invoke -exchange <id>` reads the exchange out
   of the store and carries it on rather than opening a new one, and what it
   says goes down under the same id
+- a session: `invoke` with no `-message` reads turns from stdin a line at a
+  time and answers each in the exchange the last one grew — one process, one
+  id, no copying an id between runs
 - unit tests over the core packages, the anthropic adapter, the loop and the
   store
 
-What does not exist yet: streaming, so an exchange arrives whole when it ends
-rather than a word or a turn at a time — a run in which the model calls several
-tools is silent until the last of them is done; any way to choose the model, the
-token ceiling or the tools from the command line; and any way to find a stored
-exchange from the command line, which is still a question for `sqlite3`.
+What does not exist yet: streaming, so a turn arrives whole when it ends rather
+than a word at a time — a turn in which the model calls several tools is silent
+until the last of them is done, in a session as much as in a single run; any
+way to choose the model, the token ceiling or the tools from the command line;
+and any way to find a stored exchange from the command line, which is still a
+question for `sqlite3`.
 
 ## Layout
 
@@ -159,6 +163,44 @@ every turn is for.
 
 Finding an exchange is still a question for `sqlite3`; nothing on the command
 line lists them.
+
+Between the two — one message a run, and picking a run back up by its id —
+there is a third way to hold the same conversation. `invoke` with no `-message`
+reads turns from stdin instead, a line at a time, and answers each in the
+exchange the last one grew:
+
+```sh
+go run . invoke
+> why is the sky blue?
+rayleigh scattering: shorter wavelengths are scattered more by the air
+> and at sunset?
+the light travels further through the atmosphere, so more of the blue is gone
+> ^D
+# exchange 7 in /home/you/.config/compadre/exchanges.db
+```
+
+It is the same loop `-exchange` runs across processes, with memory standing in
+for the store: the exchange never leaves, so nothing is read back and the id is
+minted once and printed at the end. A blank line is not a turn and asks again
+rather than spending a request. `-exchange` works here too, which makes a
+session something a previous run can be carried on in; `-instructions` is
+refused alongside it for the same reason as ever.
+
+The prompt goes to stderr, with the id line and for the same reason — it is the
+program talking about itself rather than the answer to what was asked. So a
+session works down a pipe as well as under a person, and nothing has to ask
+which it is:
+
+```sh
+echo 'why is the sky blue?' | go run . invoke > answer.txt
+```
+
+There are three ways out. Ctrl-D ends a session that has said everything it had
+to say. So does Ctrl-C at the prompt: nothing is in flight for the interrupt to
+spoil. A turn that failed is the third, and it is not quiet — what was said is
+printed, the failure is reported, and the id still goes to stderr, so the
+session is picked back up with `-exchange` rather than lost. Ctrl-C part way
+through an answer cancels that request and ends the session that way.
 
 `compadre help` lists the commands, and `compadre invoke -h` the arguments
 `invoke` takes.

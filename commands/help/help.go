@@ -19,8 +19,11 @@ Usage:
 
 Commands:
 
-	invoke    run one exchange with a model and print what was said
+	invoke    hold an exchange with a model and print what was said
 	help      print this
+
+invoke takes one turn with -message, or reads them from stdin a line at a
+time if there is none.
 
 Run compadre invoke -h for the arguments invoke understands.
 

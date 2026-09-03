@@ -6,6 +6,7 @@
 package invoke
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -13,6 +14,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/ksahli/compadre/internal/core/agents"
+	"github.com/ksahli/compadre/internal/core/tools/definitions"
 
 	"github.com/ksahli/compadre/internal/core/exchanges"
 	"github.com/ksahli/compadre/internal/core/messages"
@@ -67,6 +71,13 @@ func TestNew(t *testing.T) {
 			name:      "an explicitly empty message",
 			arguments: []string{"-message", ""},
 			input:     "",
+		},
+		{
+			// No message is not a mistake to be caught at parsing:
+			// it is the run that reads its turns from stdin.
+			name:      "a store and no message",
+			arguments: []string{"-store", "/tmp/exchanges.db"},
+			store:     "/tmp/exchanges.db",
 		},
 		{
 			// A message that looks like a flag is still a message: the
@@ -148,37 +159,10 @@ func TestNewRejectsUnparseableArguments(t *testing.T) {
 	}
 }
 
-// TestExecuteRejectsAnEmptyMessage pins what happens before a provider is
-// ever built: an exchange with nothing to open it is refused here, where the
-// caller can be told what to pass, rather than by the API in its own words.
-func TestExecuteRejectsAnEmptyMessage(t *testing.T) {
-	cases := []struct {
-		name  string
-		input string
-	}{
-		{"no message at all", ""},
-		{"a message that is only spaces", "   "},
-		{"a message that is only a newline", "\n"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			command := &Command{input: c.input}
-
-			err := command.Execute(context.Background())
-			if err == nil {
-				t.Fatal("Execute() error = nil, want an error")
-			}
-			if got := err.Error(); !strings.Contains(got, "-message") {
-				t.Errorf("Execute() error = %q, want it to name %q", got, "-message")
-			}
-		})
-	}
-}
-
-// TestExecuteRejectsInstructionsOnAResumedExchange pins the other thing
-// settled before a provider is built. An exchange that already exists was
-// opened with instructions of its own, and a run that passes more is asking
-// for something this command cannot do — so it is told, rather than having the
+// TestExecuteRejectsInstructionsOnAResumedExchange pins the one thing settled
+// before a provider is ever built. An exchange that already exists was opened
+// with instructions of its own, and a run that passes more is asking for
+// something this command cannot do — so it is told, rather than having the
 // flag quietly dropped.
 func TestExecuteRejectsInstructionsOnAResumedExchange(t *testing.T) {
 	command := &Command{input: "and at sunset?", exchange: "7", instructions: "be brief"}
@@ -230,10 +214,15 @@ func said(thread threads.Type) []string {
 }
 
 // TestOpen pins the two shapes an exchange arrives in. Without -exchange it is
-// a new one, carrying the instructions this run was given and the message as
-// its only turn. With one it is what the store had, the message folded onto
-// the end of it — and the id comes back with it, which is what makes every
-// later save an append rather than a second conversation.
+// a new one, carrying the instructions this run was given and no turns at all.
+// With one it is what the store had, whole — and the id comes back with it,
+// which is what makes every later save an append rather than a second
+// conversation.
+//
+// The message is not folded in here, in either shape. An exchange is opened
+// before anything knows whether this run has one turn to put in it or a
+// session's worth, and both fold their own on: that is what lets one function
+// serve the two.
 func TestOpen(t *testing.T) {
 	stored := exchanges.New("7", threads.New("be brief",
 		messages.New(roles.User, messages.Text("why is the sky blue?")),
@@ -252,7 +241,7 @@ func TestOpen(t *testing.T) {
 			command:      &Command{input: "why is the sky blue?", instructions: "be brief"},
 			id:           "",
 			instructions: "be brief",
-			said:         []string{"User: why is the sky blue?"},
+			said:         []string{},
 		},
 		{
 			name:         "an exchange that was already filed",
@@ -262,8 +251,17 @@ func TestOpen(t *testing.T) {
 			said: []string{
 				"User: why is the sky blue?",
 				"Assistant: rayleigh scattering",
-				"User: and at sunset?",
 			},
+		},
+		{
+			// A session opens the same exchange as a single
+			// message does; having nothing to say yet is not a
+			// different shape.
+			name:         "a session with nothing said in it yet",
+			command:      &Command{instructions: "be brief"},
+			id:           "",
+			instructions: "be brief",
+			said:         []string{},
 		},
 	}
 	for _, c := range cases {
@@ -284,25 +282,6 @@ func TestOpen(t *testing.T) {
 				t.Errorf("open() said %v, want %v", got, c.said)
 			}
 		})
-	}
-}
-
-// TestOpenLeavesTheFiledExchangeAlone pins the immutability the append rests
-// on: what the store handed over is not the thing that grew.
-func TestOpenLeavesTheFiledExchangeAlone(t *testing.T) {
-	stored := exchanges.New("7", threads.New("",
-		messages.New(roles.User, messages.Text("why is the sky blue?")),
-	))
-	store := &filed{exchange: stored}
-	command := &Command{input: "and at sunset?", exchange: "7"}
-
-	if _, err := command.open(context.Background(), store); err != nil {
-		t.Fatalf("open() error = %v, want nil", err)
-	}
-
-	want := []string{"User: why is the sky blue?"}
-	if got := said(stored.Thread()); !slices.Equal(got, want) {
-		t.Errorf("the filed exchange said %v, want %v", got, want)
 	}
 }
 
@@ -468,4 +447,271 @@ func TestRecord(t *testing.T) {
 			t.Errorf("the directory for the record was not made: %v", err)
 		}
 	})
+}
+
+// model is a provider with its replies handed to it, one turn's worth at a
+// time, so that a session can be run several turns deep without a service
+// behind it. It keeps every thread it was given, which is how a case says what
+// the second turn knew about the first.
+type model struct {
+	replies [][]messages.Type
+	err     error
+	threads []threads.Type
+}
+
+func (m *model) Invoke(_ Context, thread threads.Type, _ tools.Registry) ([]messages.Type, error) {
+	m.threads = append(m.threads, thread)
+	if m.err != nil {
+		return nil, m.err
+	}
+	if len(m.replies) == 0 {
+		return nil, errors.New("asked for more turns than this model has")
+	}
+	reply := m.replies[0]
+	m.replies = m.replies[1:]
+	return reply, nil
+}
+
+// answers is a provider that says each of these once, a turn apiece.
+func answers(said ...string) *model {
+	replies := [][]messages.Type{}
+	for _, text := range said {
+		replies = append(replies, []messages.Type{
+			messages.New(roles.Assistant, messages.Text(text)),
+		})
+	}
+	return &model{replies: replies}
+}
+
+// recorder stands in for a store. It files the first exchange it sees under an
+// id of its own, so that carrying one id across a whole session can be pinned,
+// and counts its writes so that a case can say the record was kept as the
+// session went rather than at the end of it.
+type recorder struct {
+	id     string
+	writes int
+}
+
+func (r *recorder) Save(_ Context, exchange Exchange) (Exchange, error) {
+	r.writes++
+	if exchange.ID() == "" {
+		exchange = exchanges.New(r.id, exchange.Thread())
+	}
+	return exchange, nil
+}
+
+func (r *recorder) Load(Context, string) (Exchange, error) {
+	return Exchange{}, errors.New("not asked for here")
+}
+
+// session builds a command whose streams a test holds both ends of, and the
+// buffers behind two of them. The third is what the session reads its turns
+// from, one per line.
+func session(turns string) (*Command, *bytes.Buffer, *bytes.Buffer) {
+	out, errs := &bytes.Buffer{}, &bytes.Buffer{}
+	return &Command{in: strings.NewReader(turns), out: out, errs: errs}, out, errs
+}
+
+// TestSession pins the shape of the thing: every line is a turn, and each is
+// answered in the exchange the last one grew rather than in one of its own.
+// The second thread the model is handed is the proof — it carries the first
+// question and its answer, which is what makes this a conversation and not two
+// runs sharing a process.
+func TestSession(t *testing.T) {
+	command, out, _ := session("why is the sky blue?\nand at sunset?\n")
+	provider := answers("rayleigh scattering", "the light travels further")
+	store := &recorder{id: "7"}
+	agent := agents.New(provider, definitions.New(), store)
+
+	finished, err := command.session(context.Background(), agent, exchanges.Open(threads.New("be brief")))
+	if err != nil {
+		t.Fatalf("session() error = %v, want nil", err)
+	}
+
+	if got, want := len(provider.threads), 2; got != want {
+		t.Fatalf("the model was asked %d times, want %d", got, want)
+	}
+	first := []string{"User: why is the sky blue?"}
+	if got := said(provider.threads[0]); !slices.Equal(got, first) {
+		t.Errorf("the first turn was handed %v, want %v", got, first)
+	}
+	second := []string{
+		"User: why is the sky blue?",
+		"Assistant: rayleigh scattering",
+		"User: and at sunset?",
+	}
+	if got := said(provider.threads[1]); !slices.Equal(got, second) {
+		t.Errorf("the second turn was handed %v, want %v", got, second)
+	}
+
+	// One exchange, under one id, holding everything said in it.
+	if got, want := finished.ID(), "7"; got != want {
+		t.Errorf("session().ID() = %q, want %q", got, want)
+	}
+	whole := append(second, "Assistant: the light travels further")
+	if got := said(finished.Thread()); !slices.Equal(got, whole) {
+		t.Errorf("session() said %v, want %v", got, whole)
+	}
+
+	if got, want := out.String(), "rayleigh scattering\nthe light travels further\n"; got != want {
+		t.Errorf("session() printed %q, want %q", got, want)
+	}
+
+	// The record was kept as the session went, not at the end of it: two
+	// writes a turn, the question before the model is asked anything and
+	// the answer once it has been. A session interrupted after the first
+	// turn has that turn on disk.
+	if got, want := store.writes, 4; got != want {
+		t.Errorf("the record was written to %d times, want %d", got, want)
+	}
+}
+
+// TestSessionKeepsTheStreamsApart pins the invariant a pipe rests on. What the
+// model said goes to stdout and nothing else does; the prompt is this program
+// talking about itself, so it goes where the id line goes.
+func TestSessionKeepsTheStreamsApart(t *testing.T) {
+	command, out, errs := session("why is the sky blue?\n")
+	agent := agents.New(answers("rayleigh scattering"), definitions.New(), &recorder{id: "7"})
+
+	if _, err := command.session(context.Background(), agent, exchanges.Open(threads.New(""))); err != nil {
+		t.Fatalf("session() error = %v, want nil", err)
+	}
+
+	if got, want := out.String(), "rayleigh scattering\n"; got != want {
+		t.Errorf("session() printed %q to stdout, want %q", got, want)
+	}
+	// One prompt before the turn and one before the read that finds the
+	// end: a session asks again until it is told there is nothing more.
+	if got, want := errs.String(), prompt+prompt; got != want {
+		t.Errorf("session() printed %q to stderr, want %q", got, want)
+	}
+}
+
+// TestSessionDoesNotSendABlankLine pins the one line that is not a turn. An
+// exchange with nothing to carry it on is a request that would come back
+// refused, and at a prompt the answer to that is to ask again rather than to
+// spend it finding out.
+func TestSessionDoesNotSendABlankLine(t *testing.T) {
+	command, out, errs := session("\n   \n\t\n")
+	provider := answers("rayleigh scattering")
+	agent := agents.New(provider, definitions.New(), &recorder{id: "7"})
+
+	finished, err := command.session(context.Background(), agent, exchanges.Open(threads.New("")))
+	if err != nil {
+		t.Fatalf("session() error = %v, want nil", err)
+	}
+
+	if got := len(provider.threads); got != 0 {
+		t.Errorf("the model was asked %d times, want 0", got)
+	}
+	if got := out.String(); got != "" {
+		t.Errorf("session() printed %q, want nothing", got)
+	}
+	// Nothing was ever said, so nothing was ever filed: the id is minted
+	// by the first save, and there was none.
+	if got := finished.ID(); got != "" {
+		t.Errorf("session().ID() = %q, want none", got)
+	}
+	// Four prompts: one for each blank line, and one for the end.
+	if got, want := strings.Count(errs.String(), prompt), 4; got != want {
+		t.Errorf("session() prompted %d times, want %d", got, want)
+	}
+}
+
+// TestSessionEndsWhenThereIsNothingLeftToRead pins the ordinary way out. Stdin
+// running out is a session that said everything it had to say, not one that
+// went wrong, so it comes back with no error and the exchange as it grew.
+func TestSessionEndsWhenThereIsNothingLeftToRead(t *testing.T) {
+	command, _, _ := session("")
+	provider := answers("rayleigh scattering")
+	agent := agents.New(provider, definitions.New(), &recorder{id: "7"})
+	opening := exchanges.Open(threads.New("be brief"))
+
+	finished, err := command.session(context.Background(), agent, opening)
+	if err != nil {
+		t.Fatalf("session() error = %v, want nil", err)
+	}
+	if got := len(provider.threads); got != 0 {
+		t.Errorf("the model was asked %d times, want 0", got)
+	}
+	if got, want := finished.Thread().Instructions(), "be brief"; got != want {
+		t.Errorf("session() came back with instructions %q, want %q", got, want)
+	}
+}
+
+// TestSessionEndsOnACancelledContext pins the other way out, and the reason
+// the read is not a plain one. An interrupt at the prompt has nothing in
+// flight to spoil, so it ends the session as quietly as running out of input
+// does — and it has to be noticed while the session is waiting, or a caller
+// who typed nothing more would have no way out at all.
+func TestSessionEndsOnACancelledContext(t *testing.T) {
+	command, out, _ := session("why is the sky blue?\n")
+	provider := answers("rayleigh scattering")
+	agent := agents.New(provider, definitions.New(), &recorder{id: "7"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	finished, err := command.session(ctx, agent, exchanges.Open(threads.New("")))
+	if err != nil {
+		t.Fatalf("session() error = %v, want nil", err)
+	}
+	if got := len(provider.threads); got != 0 {
+		t.Errorf("the model was asked %d times, want 0", got)
+	}
+	if got := finished.ID(); got != "" {
+		t.Errorf("session().ID() = %q, want none", got)
+	}
+	if got := out.String(); got != "" {
+		t.Errorf("session() printed %q, want nothing", got)
+	}
+}
+
+// TestSessionEndsOnATurnThatFailed pins the third way out, which is the one
+// that is not quiet. A turn that failed comes back as an error and the session
+// stops there rather than asking again over a provider that has stopped
+// working — but what the turns before it said is still printed, and the
+// exchange still comes back carrying its id, because that is how the caller
+// picks the session back up with -exchange.
+func TestSessionEndsOnATurnThatFailed(t *testing.T) {
+	command, out, _ := session("why is the sky blue?\nand at sunset?\nand at noon?\n")
+	// One reply, so the provider answers the first turn and refuses the
+	// second.
+	failing := &turning{model: answers("rayleigh scattering"), err: errors.New("the model is out")}
+	agent := agents.New(failing, definitions.New(), &recorder{id: "7"})
+
+	finished, err := command.session(context.Background(), agent, exchanges.Open(threads.New("")))
+	if err == nil {
+		t.Fatal("session() error = nil, want an error")
+	}
+	if got, want := err.Error(), "the model is out"; !strings.Contains(got, want) {
+		t.Errorf("session() error = %q, want it to name %q", got, want)
+	}
+	if got, want := out.String(), "rayleigh scattering\n"; got != want {
+		t.Errorf("session() printed %q, want %q", got, want)
+	}
+	// The third line is never read: the session stopped on the second.
+	if got, want := len(failing.model.threads), 2; got != want {
+		t.Errorf("the model was asked %d times, want %d", got, want)
+	}
+	if got, want := finished.ID(), "7"; got != want {
+		t.Errorf("session().ID() = %q, want %q", got, want)
+	}
+}
+
+// turning is a provider that works until it does not: it hands each call on to
+// the model behind it, and fails once that has run out of replies. It is how a
+// case says "the second turn is the one that goes wrong" without counting
+// calls from the outside.
+type turning struct {
+	model *model
+	err   error
+}
+
+func (t *turning) Invoke(ctx Context, thread threads.Type, registry tools.Registry) ([]messages.Type, error) {
+	if len(t.model.replies) == 0 {
+		t.model.threads = append(t.model.threads, thread)
+		return nil, t.err
+	}
+	return t.model.Invoke(ctx, thread, registry)
 }
