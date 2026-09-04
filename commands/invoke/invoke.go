@@ -7,9 +7,18 @@
 // [github.com/ksahli/compadre/internal/core/agents]'s work, not a command's.
 //
 // What is left here is the half that is genuinely a command's: choosing the
-// provider, deciding which tools are on offer and what root the file ones may
-// see, saying where the record goes, deciding what drives the turns, and
-// printing. The agent keeps the record but hands the exchange back rather than
+// provider and the model it reaches with the ceiling on one reply, deciding
+// which tools are on offer and what root the file ones may see, saying where
+// the record goes, saying how many turns a run may take, deciding what drives
+// the turns, and printing.
+//
+// Four of those are flags with a default rather than a fixed answer. -model
+// and -max-tokens are the adapter's to hold and are named at [anthropic.New];
+// -max-turns is the agent's and is named at [agents.New]; -workspace moves the
+// root the file tools are held inside off the directory the command was run
+// in. An absent one of any of them is not an absence but the value that was
+// true before there was a flag, which is why each default is a named constant
+// somewhere rather than a literal here. The agent keeps the record but hands the exchange back rather than
 // showing it to anyone, so the words reach a reader only because this package
 // puts them there.
 //
@@ -76,8 +85,14 @@ const prompt = "> "
 
 // Command is a parsed invoke: the instructions to stand over the exchange, the
 // message to carry it on if there is one, the exchange to continue if there is
-// one, where to keep the record of it, and the three streams it is reached
-// through.
+// one, where to keep the record of it, what the run is bounded by — the model,
+// the ceiling on one reply, the directory the file tools may see and the
+// ceiling on the turns — and the three streams it is reached through.
+//
+// The four bounds are kept as the caller gave them, zero where they were not
+// given, and the defaults are reached for at [Command.Execute] where the
+// things that own them are built. Filling them in here would put this
+// package's name on numbers that are not its to state.
 //
 // The streams are fields rather than named where they are used so that a
 // session can be driven by a test without a terminal at one end of it or an
@@ -87,6 +102,11 @@ type Command struct {
 	input        string
 	exchange     string
 	store        string
+
+	model     string
+	tokens    int64
+	directory string
+	turns     int
 
 	in   io.Reader
 	out  io.Writer
@@ -107,7 +127,7 @@ func (c *Command) Execute(ctx Context) error {
 		return fmt.Errorf("the exchange filed under '%s' has its own instructions, -instructions cannot be given with -exchange", c.exchange)
 	}
 
-	root, err := workspace()
+	root, err := workspace(c.directory)
 	if err != nil {
 		return err
 	}
@@ -133,7 +153,7 @@ func (c *Command) Execute(ctx Context) error {
 		web.New(),
 		files.NewList(root), files.NewRead(root), files.NewWrite(root),
 	)
-	agent := agents.New(anthropic.New(), registry, store)
+	agent := agents.New(anthropic.New(c.model, c.tokens), registry, store, c.turns)
 
 	// The exchange comes back whether the run ended well or badly, so what
 	// was said is printed either way: a run that failed on its fourth turn
@@ -338,21 +358,40 @@ func transcribe(out io.Writer, thread threads.Type, from int) {
 	}
 }
 
-// workspace is the directory the file tools may see: where the command was
-// run, resolved through symlinks once, here. Once rather than per call so that
-// every later question of whether a path is inside it compares two paths
-// nothing can still redirect. A failure here ends the command rather than
-// being handed to the model — there is no exchange yet to report it into, and
-// a process that cannot say where it is has no business offering to list it.
-func workspace() (string, error) {
-	root, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("could not determine the workspace: %w", err)
+// workspace is the directory the file tools may see: what -workspace named, or
+// where the command was run if it named nothing. Either way it is resolved
+// through symlinks once, here. Once rather than per call so that every later
+// question of whether a path is inside it compares two paths nothing can still
+// redirect. A failure here ends the command rather than being handed to the
+// model — there is no exchange yet to report it into, and a process that
+// cannot say where it is has no business offering to list it.
+//
+// A path that is not a directory is refused by name. The tools would hold the
+// model inside it perfectly well — a file contains nothing, so every request
+// would be told no — and a run in which every listing is empty for a reason
+// nobody is told is a worse answer than saying what was wrong with the
+// argument.
+func workspace(directory string) (string, error) {
+	root := directory
+	if root == "" {
+		current, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("could not determine the workspace: %w", err)
+		}
+		root = current
 	}
 
-	root, err = filepath.EvalSymlinks(root)
+	root, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return "", fmt.Errorf("could not resolve the workspace: %w", err)
+	}
+
+	info, err := os.Stat(root)
+	if err != nil {
+		return "", fmt.Errorf("could not resolve the workspace: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("the workspace must be a directory, got '%s'", directory)
 	}
 
 	return root, nil
@@ -360,14 +399,28 @@ func workspace() (string, error) {
 
 // New parses the arguments invoke understands: -instructions for the system
 // instructions, -message for a single turn to send, -exchange for an exchange
-// to continue rather than open, and -store for where to keep the record of it.
+// to continue rather than open, -store for where to keep the record of it,
+// -model for the model to reach and -max-tokens for the ceiling on one reply
+// it may write, -workspace for the directory the file tools may see, and
+// -max-turns for how many turns one exchange may take.
+//
 // An absent -store is not a run that keeps no record: it is a run that keeps
 // one where this program keeps them by default, and an absent -exchange is a
-// run that opens one rather than one that keeps nothing. An absent -message is
-// neither: it is a run that reads its turns from stdin instead of from the
-// command line. An argument the flag set cannot make sense of comes back as an
-// error: parsing is not the place to end the process, and the caller is
-// already reporting.
+// run that opens one rather than one that keeps nothing. The same holds for
+// the four bounds — an absent one of them is the value that was true before
+// there was a flag to say otherwise, which is why the zero value stands for
+// absence and the default is reached for at [Command.Execute]. An absent
+// -message is neither: it is a run that reads its turns from stdin instead of
+// from the command line. An argument the flag set cannot make sense of comes
+// back as an error: parsing is not the place to end the process, and the
+// caller is already reporting.
+//
+// A negative ceiling is refused here, and that is this function's own check
+// rather than the flag set's: -3 parses perfectly well as a number and means
+// nothing as a bound. It is refused rather than clamped for the reason an
+// unparseable flag is refused — a caller who typed it meant something, and
+// quietly running with a different number is the answer to a question nobody
+// asked. Zero is the absence above and is left alone.
 //
 // The flag set writes into a buffer rather than to a stream of its own, for
 // the same reason. A request for help is one of the errors Parse can return,
@@ -386,12 +439,23 @@ func New(arguments []string) (*Command, error) {
 	f.StringVar(&c.input, "message", "", "user message, or read them from stdin if absent")
 	f.StringVar(&c.exchange, "exchange", "", "the exchange to continue, from a previous run")
 	f.StringVar(&c.store, "store", "", "where to keep the record of the exchange")
+	f.StringVar(&c.model, "model", "", "the model to reach, "+anthropic.Model+" if absent")
+	f.Int64Var(&c.tokens, "max-tokens", 0, fmt.Sprintf("ceiling on one reply, %d if absent", anthropic.Tokens))
+	f.StringVar(&c.directory, "workspace", "", "the directory the file tools may see, the current one if absent")
+	f.IntVar(&c.turns, "max-turns", 0, fmt.Sprintf("ceiling on the turns in one exchange, %d if absent", agents.Turns))
 
 	if err := f.Parse(arguments); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil, errors.New(strings.TrimRight(usage.String(), "\n"))
 		}
 		return nil, err
+	}
+
+	if c.tokens < 0 {
+		return nil, fmt.Errorf("-max-tokens must be a positive number of tokens, got %d", c.tokens)
+	}
+	if c.turns < 0 {
+		return nil, fmt.Errorf("-max-turns must be a positive number of turns, got %d", c.turns)
 	}
 
 	c.in, c.out, c.errs = os.Stdin, os.Stdout, os.Stderr

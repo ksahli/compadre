@@ -11,6 +11,8 @@
 // Everything the port has no shape for — usage, stop reason — is dropped on
 // the way through.
 //
-// The model and the token ceiling are fixed here for now, and are reachable
-// neither from the core nor from the command line.
+// The model and the token ceiling are the adapter's, not the thread's: they
+// arrive at [New] from the wiring, which is what lets the command line choose
+// them without the core acquiring a word for either. An adapter built without
+// an opinion on them falls back to [Model] and [Tokens].
 package anthropic

@@ -26,6 +26,16 @@ type (
 	Option = option.RequestOption
 )
 
+// Model is the model an adapter reaches when it is built without one named,
+// and Tokens the ceiling on one reply when it is built without one. They are
+// stated here rather than at the wiring because which model this vendor has
+// and what a sensible ceiling on it is are facts about this API, and this is
+// the package entitled to know them.
+const (
+	Model        = string(sdk.ModelClaudeSonnet5)
+	Tokens int64 = 1024
+)
+
 // blocks maps what a message says onto the content blocks the API expects,
 // in the order it said them. Arguments go out as they arrived: they are the
 // model's own JSON, and re-encoding them would be this adapter putting words
@@ -103,7 +113,11 @@ func catalogue(registry tools.Registry) []sdk.ToolUnionParam {
 // system prompt, which is where this API wants them. A role the core has that
 // this mapping does not cover is skipped rather than guessed at, and so is a
 // message that turns out to say nothing this adapter has a block for.
-func parameters(thread threads.Type, registry tools.Registry) sdk.MessageNewParams {
+//
+// It is a method rather than a function because the model and the ceiling are
+// what the adapter was built with, not something a thread carries: the core
+// has no vocabulary for either and should not grow one.
+func (p *provider) parameters(thread threads.Type, registry tools.Registry) sdk.MessageNewParams {
 	turns := []sdk.MessageParam{}
 	for _, message := range thread.Messages() {
 		content := blocks(message)
@@ -119,8 +133,8 @@ func parameters(thread threads.Type, registry tools.Registry) sdk.MessageNewPara
 	}
 
 	parameters := sdk.MessageNewParams{
-		Model:     sdk.ModelClaudeSonnet5,
-		MaxTokens: 1024,
+		Model:     sdk.Model(p.model),
+		MaxTokens: p.tokens,
 		Messages:  turns,
 		Tools:     catalogue(registry),
 	}
@@ -138,6 +152,8 @@ func parameters(thread threads.Type, registry tools.Registry) sdk.MessageNewPara
 // port, not this type; [New] is the only way to get one.
 type provider struct {
 	client sdk.Client
+	model  string
+	tokens int64
 }
 
 // reply turns the response's content blocks into one assistant message
@@ -196,7 +212,7 @@ func refused(response *sdk.Message) error {
 // adapter has a shape for. Ending an exchange silently and ending it well look
 // the same to a caller, which is reason enough not to let the first happen.
 func (p *provider) Invoke(ctx Context, thread threads.Type, registry tools.Registry) ([]messages.Type, error) {
-	response, err := p.client.Messages.New(ctx, parameters(thread, registry))
+	response, err := p.client.Messages.New(ctx, p.parameters(thread, registry))
 	if err != nil {
 		return nil, err
 	}
@@ -216,9 +232,25 @@ func (p *provider) Invoke(ctx Context, thread threads.Type, registry tools.Regis
 // port rather than a concrete type: whoever calls this is the wiring, and
 // everything downstream of it should see only [inference.Provider].
 //
+// The model and the ceiling on one reply are arguments because they are the
+// caller's to choose, and an adapter built with the wrong one is not degraded
+// but pointed at a different model. A caller with no opinion says so by
+// passing an empty model or a ceiling of zero, and gets [Model] and [Tokens];
+// that is a fallback rather than validation, so that a value nobody chose can
+// never go out as a request asking for no tokens at all.
+//
 // Credentials come from the environment unless an [Option] says otherwise.
-func New(options ...Option) inference.Provider {
+func New(model string, tokens int64, options ...Option) inference.Provider {
+	if model == "" {
+		model = Model
+	}
+	if tokens <= 0 {
+		tokens = Tokens
+	}
+
 	return &provider{
 		client: sdk.NewClient(options...),
+		model:  model,
+		tokens: tokens,
 	}
 }

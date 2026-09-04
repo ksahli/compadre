@@ -37,15 +37,19 @@ Early. What works today:
 - a session: `invoke` with no `-message` reads turns from stdin a line at a
   time and answers each in the exchange the last one grew — one process, one
   id, no copying an id between runs
+- what the run is bounded by, on the command line: `-model` and `-max-tokens`
+  for the model to reach and how much of a reply it may write, `-workspace` for
+  the directory the file tools may see, and `-max-turns` for how many turns one
+  exchange may take — each optional, and each defaulting to the value that was
+  true before there was a flag
 - unit tests over the core packages, the anthropic adapter, the loop and the
   store
 
 What does not exist yet: streaming, so a turn arrives whole when it ends rather
 than a word at a time — a turn in which the model calls several tools is silent
 until the last of them is done, in a session as much as in a single run; any
-way to choose the model, the token ceiling or the tools from the command line;
-and any way to find a stored exchange from the command line, which is still a
-question for `sqlite3`.
+way to choose the tools from the command line; and any way to find a stored
+exchange from the command line, which is still a question for `sqlite3`.
 
 ## Layout
 
@@ -205,10 +209,13 @@ through an answer cancels that request and ends the session that way.
 `compadre help` lists the commands, and `compadre invoke -h` the arguments
 `invoke` takes.
 
-The model and token ceiling are fixed in the Anthropic adapter for now, and the
-tools on offer are fixed in the `invoke` command; none is reachable from the
-command line. An exchange is bounded at ten turns, so a model that keeps asking
-for tools is stopped rather than left to spend. A reply the model stopped short
+The model and the ceiling on one reply are `-model` and `-max-tokens`,
+defaulting to `claude-sonnet-5` and 1024 tokens; the directory the file tools
+may see is `-workspace`, defaulting to the one the command was run in. The
+tools on offer are still fixed in the `invoke` command and are not reachable
+from the command line. An exchange is bounded at `-max-turns` turns, ten by
+default, so a model that keeps asking for tools is stopped rather than left to
+spend. A reply the model stopped short
 of finishing — cut off at the token ceiling, declined, or out of context — is an
 error rather than a half answer passed off as a whole one, and an interrupt
 cancels the exchange rather than killing the process mid-request.

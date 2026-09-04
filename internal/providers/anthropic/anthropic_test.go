@@ -323,7 +323,7 @@ func TestParameters(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			captured, _, options := stub(t, reply(text("hola")))
 
-			if _, err := anthropic.New(options...).Invoke(context.Background(), c.thread, c.registry); err != nil {
+			if _, err := anthropic.New("", 0, options...).Invoke(context.Background(), c.thread, c.registry); err != nil {
 				t.Fatalf("Invoke() error = %v, want nil", err)
 			}
 
@@ -389,7 +389,7 @@ func TestParametersOffersTheRegistry(t *testing.T) {
 
 	thread := threads.New("", messages.New(roles.User, messages.Text("hello")))
 	registry := definitions.New(weather, clock)
-	if _, err := anthropic.New(options...).Invoke(context.Background(), thread, registry); err != nil {
+	if _, err := anthropic.New("", 0, options...).Invoke(context.Background(), thread, registry); err != nil {
 		t.Fatalf("Invoke() error = %v, want nil", err)
 	}
 
@@ -445,7 +445,7 @@ func TestParametersOffersNothingWithoutTools(t *testing.T) {
 			captured, _, options := stub(t, reply(text("hola")))
 
 			thread := threads.New("", messages.New(roles.User, messages.Text("hello")))
-			if _, err := anthropic.New(options...).Invoke(context.Background(), thread, c.registry); err != nil {
+			if _, err := anthropic.New("", 0, options...).Invoke(context.Background(), thread, c.registry); err != nil {
 				t.Fatalf("Invoke() error = %v, want nil", err)
 			}
 
@@ -456,22 +456,57 @@ func TestParametersOffersNothingWithoutTools(t *testing.T) {
 	}
 }
 
-// TestParametersFixesModelAndCeiling pins the two values the adapter chooses
-// on its own. They are reachable from neither the core nor the command line,
-// so this test is the only thing standing over them.
-func TestParametersFixesModelAndCeiling(t *testing.T) {
-	captured, _, options := stub(t, reply(text("hola")))
-
-	thread := threads.New("", messages.New(roles.User, messages.Text("hello")))
-	if _, err := anthropic.New(options...).Invoke(context.Background(), thread, nil); err != nil {
-		t.Fatalf("Invoke() error = %v, want nil", err)
+// TestParametersCarriesTheModelAndCeiling covers the two values that are the
+// adapter's rather than the thread's, in both of the shapes a caller can build
+// one with. Named, they go out as named; left at their zero values, the
+// package's own defaults go out instead — which is the whole of what "no
+// opinion" means here, and the reason a request can never ask for no tokens.
+func TestParametersCarriesTheModelAndCeiling(t *testing.T) {
+	cases := []struct {
+		name    string
+		model   string
+		tokens  int64
+		sent    string
+		ceiling int64
+	}{
+		{
+			name:    "as the caller named them",
+			model:   "claude-opus-5",
+			tokens:  4096,
+			sent:    "claude-opus-5",
+			ceiling: 4096,
+		},
+		{
+			name:    "as the package's own where the caller named none",
+			sent:    anthropic.Model,
+			ceiling: anthropic.Tokens,
+		},
+		{
+			// A ceiling nobody could have meant falls back rather
+			// than going out: MaxTokens: -1 is a request the API
+			// refuses and a caller cannot read the reason for.
+			name:    "as the package's own where the ceiling is no ceiling",
+			tokens:  -1,
+			sent:    anthropic.Model,
+			ceiling: anthropic.Tokens,
+		},
 	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			captured, _, options := stub(t, reply(text("hola")))
 
-	if want := "claude-sonnet-5"; captured.Model != want {
-		t.Errorf("model = %q, want %q", captured.Model, want)
-	}
-	if want := int64(1024); captured.MaxTokens != want {
-		t.Errorf("max_tokens = %d, want %d", captured.MaxTokens, want)
+			thread := threads.New("", messages.New(roles.User, messages.Text("hello")))
+			if _, err := anthropic.New(c.model, c.tokens, options...).Invoke(context.Background(), thread, nil); err != nil {
+				t.Fatalf("Invoke() error = %v, want nil", err)
+			}
+
+			if captured.Model != c.sent {
+				t.Errorf("model = %q, want %q", captured.Model, c.sent)
+			}
+			if captured.MaxTokens != c.ceiling {
+				t.Errorf("max_tokens = %d, want %d", captured.MaxTokens, c.ceiling)
+			}
+		})
 	}
 }
 
@@ -520,7 +555,7 @@ func TestInvoke(t *testing.T) {
 			_, calls, options := stub(t, reply(c.blocks...))
 
 			thread := threads.New("", messages.New(roles.User, messages.Text("hello")))
-			replies, err := anthropic.New(options...).Invoke(context.Background(), thread, nil)
+			replies, err := anthropic.New("", 0, options...).Invoke(context.Background(), thread, nil)
 			if err != nil {
 				t.Fatalf("Invoke() error = %v, want nil", err)
 			}
@@ -595,7 +630,7 @@ func TestInvokeRefusesANonReply(t *testing.T) {
 			_, calls, options := stub(t, c.body)
 
 			thread := threads.New("", messages.New(roles.User, messages.Text("hello")))
-			replies, err := anthropic.New(options...).Invoke(context.Background(), thread, nil)
+			replies, err := anthropic.New("", 0, options...).Invoke(context.Background(), thread, nil)
 			if err == nil {
 				t.Fatalf("Invoke() error = nil, want an error")
 			}
@@ -616,7 +651,7 @@ func TestInvokeReportsFailure(t *testing.T) {
 	options := failing(t)
 
 	thread := threads.New("", messages.New(roles.User, messages.Text("hello")))
-	replies, err := anthropic.New(options...).Invoke(context.Background(), thread, nil)
+	replies, err := anthropic.New("", 0, options...).Invoke(context.Background(), thread, nil)
 	if err == nil {
 		t.Fatal("Invoke() error = nil, want an error")
 	}

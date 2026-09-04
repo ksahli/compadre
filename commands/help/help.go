@@ -23,9 +23,14 @@ Commands:
 	help      print this
 
 invoke takes one turn with -message, or reads them from stdin a line at a
-time if there is none.
+time if there is none. What the run is bounded by is the caller's to choose:
+-model and -max-tokens for the model to reach and how much of a reply it may
+write, -workspace for the directory the file tools may see, and -max-turns for
+how many turns one exchange may take. An absent one of those is the value that
+was true before there was a flag to say otherwise.
 
-Run compadre invoke -h for the arguments invoke understands.
+Run compadre invoke -h for the arguments invoke understands, and the defaults
+they stand in for.
 
 The Anthropic API key is read from ANTHROPIC_API_KEY.`
 

@@ -34,9 +34,16 @@ func TestNew(t *testing.T) {
 		input        string
 		exchange     string
 		store        string
+		model        string
+		tokens       int64
+		directory    string
+		turns        int
 	}{
 		{
-			name:      "no arguments leaves both empty",
+			// Every bound left at its zero value, which is how an
+			// absent flag says "whatever was true before there was
+			// one to say otherwise".
+			name:      "no arguments leaves them all empty",
 			arguments: nil,
 		},
 		{
@@ -86,6 +93,46 @@ func TestNew(t *testing.T) {
 			arguments: []string{"-message", "-instructions"},
 			input:     "-instructions",
 		},
+		{
+			name:      "a model of the caller's choosing",
+			arguments: []string{"-model", "claude-opus-5", "-message", "hello"},
+			input:     "hello",
+			model:     "claude-opus-5",
+		},
+		{
+			name:      "a ceiling on one reply",
+			arguments: []string{"-max-tokens", "4096", "-message", "hello"},
+			input:     "hello",
+			tokens:    4096,
+		},
+		{
+			name:      "a workspace somewhere other than here",
+			arguments: []string{"-workspace", "/tmp", "-message", "hello"},
+			input:     "hello",
+			directory: "/tmp",
+		},
+		{
+			name:      "a ceiling on the turns",
+			arguments: []string{"-max-turns", "25", "-message", "hello"},
+			input:     "hello",
+			turns:     25,
+		},
+		{
+			// Zero is not a bound of zero: it is the absence the
+			// defaults are reached for at Execute, and passing it
+			// outright is the same as passing nothing.
+			name:      "a ceiling explicitly left to the defaults",
+			arguments: []string{"-max-tokens", "0", "-max-turns", "0"},
+		},
+		{
+			name:         "all four bounds at once",
+			arguments:    []string{"-model", "claude-opus-5", "-max-tokens", "4096", "-workspace", "/tmp", "-max-turns", "25", "-instructions", "be brief"},
+			instructions: "be brief",
+			model:        "claude-opus-5",
+			tokens:       4096,
+			directory:    "/tmp",
+			turns:        25,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -108,6 +155,18 @@ func TestNew(t *testing.T) {
 			if command.store != c.store {
 				t.Errorf("store = %q, want %q", command.store, c.store)
 			}
+			if command.model != c.model {
+				t.Errorf("model = %q, want %q", command.model, c.model)
+			}
+			if command.tokens != c.tokens {
+				t.Errorf("tokens = %d, want %d", command.tokens, c.tokens)
+			}
+			if command.directory != c.directory {
+				t.Errorf("directory = %q, want %q", command.directory, c.directory)
+			}
+			if command.turns != c.turns {
+				t.Errorf("turns = %d, want %d", command.turns, c.turns)
+			}
 		})
 	}
 }
@@ -125,7 +184,7 @@ func TestNewReportsHelpAsItsUsage(t *testing.T) {
 			if command != nil {
 				t.Errorf("New() = %v, want nil on error", command)
 			}
-			for _, want := range []string{"-instructions", "-message", "-exchange", "-store"} {
+			for _, want := range []string{"-instructions", "-message", "-exchange", "-store", "-model", "-max-tokens", "-workspace", "-max-turns"} {
 				if got := err.Error(); !strings.Contains(got, want) {
 					t.Errorf("New() error = %q, want it to name %q", got, want)
 				}
@@ -145,6 +204,14 @@ func TestNewRejectsUnparseableArguments(t *testing.T) {
 		{"a flag nothing defines", []string{"-nope"}},
 		{"a flag missing its value", []string{"-message"}},
 		{"a positional where a flag belongs", []string{"-instructions", "be brief", "-nope", "x"}},
+		{"a ceiling that is not a number", []string{"-max-tokens", "plenty"}},
+		{"turns that are not a number", []string{"-max-turns", "lots"}},
+		// These two parse as numbers and are refused here rather
+		// than by the flag set: -3 is a bound nobody could have
+		// meant, and running with a different one would be an
+		// answer to a question nobody asked.
+		{"a ceiling below zero", []string{"-max-tokens", "-3"}},
+		{"turns below zero", []string{"-max-turns", "-3"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -405,6 +472,97 @@ func TestTranscribeFromWhereTheRunBegan(t *testing.T) {
 	}
 }
 
+// TestWorkspace pins the root the file tools are held inside: what -workspace
+// named, or where the command was run if it named nothing. Both come back
+// resolved, which is what lets every later containment check compare two paths
+// nothing can still redirect.
+func TestWorkspace(t *testing.T) {
+	directory := t.TempDir()
+
+	// The temporary directory is itself reached through a symlink on some
+	// platforms, so what to expect is what resolving says rather than what
+	// t.TempDir handed over.
+	resolved, err := filepath.EvalSymlinks(directory)
+	if err != nil {
+		t.Fatalf("resolving the temporary directory: %v", err)
+	}
+
+	t.Run("a directory the caller named", func(t *testing.T) {
+		root, err := workspace(directory)
+		if err != nil {
+			t.Fatalf("workspace() error = %v, want nil", err)
+		}
+		if root != resolved {
+			t.Errorf("workspace() = %q, want %q", root, resolved)
+		}
+	})
+
+	t.Run("a link to one, followed", func(t *testing.T) {
+		link := filepath.Join(t.TempDir(), "elsewhere")
+		if err := os.Symlink(directory, link); err != nil {
+			t.Fatalf("linking to the temporary directory: %v", err)
+		}
+
+		root, err := workspace(link)
+		if err != nil {
+			t.Fatalf("workspace() error = %v, want nil", err)
+		}
+		if root != resolved {
+			t.Errorf("workspace() = %q, want %q", root, resolved)
+		}
+	})
+
+	t.Run("nothing named is where the command was run", func(t *testing.T) {
+		here, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("finding the working directory: %v", err)
+		}
+		here, err = filepath.EvalSymlinks(here)
+		if err != nil {
+			t.Fatalf("resolving the working directory: %v", err)
+		}
+
+		root, err := workspace("")
+		if err != nil {
+			t.Fatalf("workspace() error = %v, want nil", err)
+		}
+		if root != here {
+			t.Errorf("workspace() = %q, want %q", root, here)
+		}
+	})
+}
+
+// TestWorkspaceRejectsWhatIsNotOne covers the two arguments that cannot be a
+// root. Both are refused rather than worked around: the tools would hold the
+// model inside a file perfectly well and answer every request with nothing,
+// and a run whose every listing is empty for a reason nobody is told is worse
+// than being told what was wrong with the argument.
+func TestWorkspaceRejectsWhatIsNotOne(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "notadirectory")
+	if err := os.WriteFile(file, []byte("hello"), 0o600); err != nil {
+		t.Fatalf("writing the file: %v", err)
+	}
+
+	cases := []struct {
+		name      string
+		directory string
+	}{
+		{"a path that is not there", filepath.Join(t.TempDir(), "missing")},
+		{"a file rather than a directory", file},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root, err := workspace(c.directory)
+			if err == nil {
+				t.Fatal("workspace() error = nil, want an error")
+			}
+			if root != "" {
+				t.Errorf("workspace() = %q, want it empty on error", root)
+			}
+		})
+	}
+}
+
 // TestRecord pins where the exchange is written. A path given on the command
 // line is taken as it is; without one, the record goes to a database of this
 // program's own under the user's config directory rather than into whatever
@@ -521,7 +679,7 @@ func TestSession(t *testing.T) {
 	command, out, _ := session("why is the sky blue?\nand at sunset?\n")
 	provider := answers("rayleigh scattering", "the light travels further")
 	store := &recorder{id: "7"}
-	agent := agents.New(provider, definitions.New(), store)
+	agent := agents.New(provider, definitions.New(), store, agents.Turns)
 
 	finished, err := command.session(context.Background(), agent, exchanges.Open(threads.New("be brief")))
 	if err != nil {
@@ -571,7 +729,7 @@ func TestSession(t *testing.T) {
 // talking about itself, so it goes where the id line goes.
 func TestSessionKeepsTheStreamsApart(t *testing.T) {
 	command, out, errs := session("why is the sky blue?\n")
-	agent := agents.New(answers("rayleigh scattering"), definitions.New(), &recorder{id: "7"})
+	agent := agents.New(answers("rayleigh scattering"), definitions.New(), &recorder{id: "7"}, agents.Turns)
 
 	if _, err := command.session(context.Background(), agent, exchanges.Open(threads.New(""))); err != nil {
 		t.Fatalf("session() error = %v, want nil", err)
@@ -594,7 +752,7 @@ func TestSessionKeepsTheStreamsApart(t *testing.T) {
 func TestSessionDoesNotSendABlankLine(t *testing.T) {
 	command, out, errs := session("\n   \n\t\n")
 	provider := answers("rayleigh scattering")
-	agent := agents.New(provider, definitions.New(), &recorder{id: "7"})
+	agent := agents.New(provider, definitions.New(), &recorder{id: "7"}, agents.Turns)
 
 	finished, err := command.session(context.Background(), agent, exchanges.Open(threads.New("")))
 	if err != nil {
@@ -624,7 +782,7 @@ func TestSessionDoesNotSendABlankLine(t *testing.T) {
 func TestSessionEndsWhenThereIsNothingLeftToRead(t *testing.T) {
 	command, _, _ := session("")
 	provider := answers("rayleigh scattering")
-	agent := agents.New(provider, definitions.New(), &recorder{id: "7"})
+	agent := agents.New(provider, definitions.New(), &recorder{id: "7"}, agents.Turns)
 	opening := exchanges.Open(threads.New("be brief"))
 
 	finished, err := command.session(context.Background(), agent, opening)
@@ -647,7 +805,7 @@ func TestSessionEndsWhenThereIsNothingLeftToRead(t *testing.T) {
 func TestSessionEndsOnACancelledContext(t *testing.T) {
 	command, out, _ := session("why is the sky blue?\n")
 	provider := answers("rayleigh scattering")
-	agent := agents.New(provider, definitions.New(), &recorder{id: "7"})
+	agent := agents.New(provider, definitions.New(), &recorder{id: "7"}, agents.Turns)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -678,7 +836,7 @@ func TestSessionEndsOnATurnThatFailed(t *testing.T) {
 	// One reply, so the provider answers the first turn and refuses the
 	// second.
 	failing := &turning{model: answers("rayleigh scattering"), err: errors.New("the model is out")}
-	agent := agents.New(failing, definitions.New(), &recorder{id: "7"})
+	agent := agents.New(failing, definitions.New(), &recorder{id: "7"}, agents.Turns)
 
 	finished, err := command.session(context.Background(), agent, exchanges.Open(threads.New("")))
 	if err == nil {

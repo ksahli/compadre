@@ -21,12 +21,14 @@ type (
 	Store    = memory.Store
 )
 
-// Turns is the ceiling on one exchange. A model that keeps asking for tools
-// would otherwise spend without end, and stopping loudly is better than that.
+// Turns is the ceiling on one exchange a caller names when it has no reason
+// to name another. A model that keeps asking for tools would otherwise spend
+// without end, and stopping loudly is better than that.
 //
 // It is exported because it is a fact about the runtime a caller may need to
 // state — a command explaining itself, a test pinning the bound — rather than
-// a number this package keeps to itself.
+// a number this package keeps to itself. The ceiling an agent actually runs to
+// is the one it was built with; this is only the number to reach for.
 const Turns = 10
 
 // Type is an agent: a model to reach, the tools it may ask for, and where the
@@ -38,18 +40,29 @@ type Type struct {
 	provider Provider
 	registry Registry
 	store    Store
+	turns    int
 }
 
 // New builds an agent from the model it reaches through, the tools it may
-// offer, and the store it keeps the record in. All three are arguments and
-// none has a default: which provider answers, which tools are on offer and
-// which engine keeps the record are the wiring's call, and an agent built with
-// the wrong one is not degraded but pointed somewhere else.
+// offer, the store it keeps the record in, and the ceiling on the turns it
+// will run. All four are arguments and none has a default: which provider
+// answers, which tools are on offer, which engine keeps the record and how
+// long a run may go on are the wiring's call, and an agent built with the
+// wrong one is not degraded but pointed somewhere else.
+//
+// A ceiling of zero or less falls back to [Turns] rather than being refused.
+// This returns a value and has nowhere to report an error to, and an agent
+// that would end every exchange before its first round trip is a worse answer
+// than the number a caller who named none would have meant.
 //
 // An empty registry is legal and means the model is offered no tools, which
 // makes the loop one round trip and an answer.
-func New(provider Provider, registry Registry, store Store) Type {
-	return Type{provider: provider, registry: registry, store: store}
+func New(provider Provider, registry Registry, store Store, turns int) Type {
+	if turns <= 0 {
+		turns = Turns
+	}
+
+	return Type{provider: provider, registry: registry, store: store, turns: turns}
 }
 
 // Converse runs the exchange to its end and returns it as it ended. Each turn
@@ -78,7 +91,7 @@ func (a Type) Converse(ctx Context, exchange Exchange) (Exchange, error) {
 		return exchange, err
 	}
 
-	for range Turns {
+	for range a.turns {
 		thread := exchange.Thread()
 
 		replies, err := a.provider.Invoke(ctx, thread, a.registry)
@@ -125,7 +138,7 @@ func (a Type) Converse(ctx Context, exchange Exchange) (Exchange, error) {
 		}
 	}
 
-	return exchange, fmt.Errorf("gave up after %d turns: the model kept asking for tools", Turns)
+	return exchange, fmt.Errorf("gave up after %d turns: the model kept asking for tools", a.turns)
 }
 
 // save writes the exchange down and returns it filed. A store that cannot

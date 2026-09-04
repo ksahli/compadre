@@ -3,6 +3,7 @@ package agents_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -246,7 +247,7 @@ func TestConverse(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			provider, kept := &model{replies: c.replies}, store()
 
-			finished, err := agents.New(provider, registry(), kept).Converse(context.Background(), unfiled())
+			finished, err := agents.New(provider, registry(), kept, agents.Turns).Converse(context.Background(), unfiled())
 			if err != nil {
 				t.Fatalf("Converse() error = %v, want nil", err)
 			}
@@ -275,7 +276,7 @@ func TestConverse(t *testing.T) {
 func TestConverseLeavesTheOpeningThreadAlone(t *testing.T) {
 	provider, opened := &model{replies: [][]messages.Type{says("hola")}}, unfiled()
 
-	if _, err := agents.New(provider, registry(), store()).Converse(context.Background(), opened); err != nil {
+	if _, err := agents.New(provider, registry(), store(), agents.Turns).Converse(context.Background(), opened); err != nil {
 		t.Fatalf("Converse() error = %v, want nil", err)
 	}
 
@@ -291,15 +292,39 @@ func TestConverseLeavesTheOpeningThreadAlone(t *testing.T) {
 
 // TestConverseStopsAtTheCeiling pins the bound. A model that never stops
 // asking is stopped, and loudly: an exchange that runs forever spends forever.
+//
+// The bound is the one the agent was built with, so the cases are the shapes a
+// caller can build one with: a ceiling of its own, the default named, and a
+// number that is no ceiling at all — which falls back rather than ending the
+// run before its first round trip, since [agents.New] has nowhere to report an
+// error to and a silent no-op would be the worse answer.
 func TestConverseStopsAtTheCeiling(t *testing.T) {
-	provider := &model{replies: [][]messages.Type{asks("toolu_1", "works")}}
-
-	_, err := agents.New(provider, registry(), store()).Converse(context.Background(), unfiled())
-	if err == nil {
-		t.Fatal("Converse() error = nil, want an error")
+	cases := []struct {
+		name  string
+		turns int
+		asked int
+	}{
+		{name: "the ceiling the caller named", turns: 2, asked: 2},
+		{name: "the ceiling the package names", turns: agents.Turns, asked: agents.Turns},
+		{name: "a ceiling that is none", turns: 0, asked: agents.Turns},
 	}
-	if provider.calls() != agents.Turns {
-		t.Errorf("provider was asked %d times, want %d", provider.calls(), agents.Turns)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			provider := &model{replies: [][]messages.Type{asks("toolu_1", "works")}}
+
+			_, err := agents.New(provider, registry(), store(), c.turns).Converse(context.Background(), unfiled())
+			if err == nil {
+				t.Fatal("Converse() error = nil, want an error")
+			}
+			// The number is in the report because a caller who
+			// moved the bound is owed the bound they moved it to.
+			if want := fmt.Sprintf("%d turns", c.asked); !strings.Contains(err.Error(), want) {
+				t.Errorf("Converse() error = %q, want it to mention %q", err, want)
+			}
+			if provider.calls() != c.asked {
+				t.Errorf("provider was asked %d times, want %d", provider.calls(), c.asked)
+			}
+		})
 	}
 }
 
@@ -309,7 +334,7 @@ func TestConverseReportsFailure(t *testing.T) {
 	refused := errors.New("refused")
 	provider := &model{err: refused}
 
-	_, err := agents.New(provider, registry(), store()).Converse(context.Background(), unfiled())
+	_, err := agents.New(provider, registry(), store(), agents.Turns).Converse(context.Background(), unfiled())
 	if !errors.Is(err, refused) {
 		t.Fatalf("Converse() error = %v, want %v", err, refused)
 	}
@@ -326,7 +351,7 @@ func TestConverseReturnsWhatItHadWhenItStopped(t *testing.T) {
 	t.Run("a provider that refused", func(t *testing.T) {
 		provider, kept := &model{err: errors.New("refused")}, store()
 
-		finished, err := agents.New(provider, registry(), kept).Converse(context.Background(), unfiled())
+		finished, err := agents.New(provider, registry(), kept, agents.Turns).Converse(context.Background(), unfiled())
 		if err == nil {
 			t.Fatal("Converse() error = nil, want an error")
 		}
@@ -354,7 +379,7 @@ func TestConverseReturnsWhatItHadWhenItStopped(t *testing.T) {
 			)},
 		}}
 
-		finished, err := agents.New(provider, registry(), store()).Converse(context.Background(), unfiled())
+		finished, err := agents.New(provider, registry(), store(), agents.Turns).Converse(context.Background(), unfiled())
 		if err == nil {
 			t.Fatal("Converse() error = nil, want an error")
 		}
@@ -375,7 +400,7 @@ func TestConverseReturnsWhatItHadWhenItStopped(t *testing.T) {
 func TestConverseWithNoTools(t *testing.T) {
 	provider := &model{replies: [][]messages.Type{says("hola")}}
 
-	finished, err := agents.New(provider, definitions.New(), store()).Converse(context.Background(), unfiled())
+	finished, err := agents.New(provider, definitions.New(), store(), agents.Turns).Converse(context.Background(), unfiled())
 	if err != nil {
 		t.Fatalf("Converse() error = %v, want nil", err)
 	}
@@ -398,7 +423,7 @@ func TestConverseWritesTheExchangeDownAsItHappens(t *testing.T) {
 		says("hola"),
 	}}, store()
 
-	if _, err := agents.New(provider, registry(), kept).Converse(context.Background(), unfiled()); err != nil {
+	if _, err := agents.New(provider, registry(), kept, agents.Turns).Converse(context.Background(), unfiled()); err != nil {
 		t.Fatalf("Converse() error = %v, want nil", err)
 	}
 
@@ -422,7 +447,7 @@ func TestConverseCarriesTheIDTheStoreGaveIt(t *testing.T) {
 		says("hola"),
 	}}, store()
 
-	finished, err := agents.New(provider, registry(), kept).Converse(context.Background(), unfiled())
+	finished, err := agents.New(provider, registry(), kept, agents.Turns).Converse(context.Background(), unfiled())
 	if err != nil {
 		t.Fatalf("Converse() error = %v, want nil", err)
 	}
@@ -449,7 +474,7 @@ func TestConverseStopsWhenTheRecordCannotBeKept(t *testing.T) {
 		provider := &model{replies: [][]messages.Type{says("hola")}}
 		kept := &recorder{id: "7", fail: full, failOn: 1}
 
-		finished, err := agents.New(provider, registry(), kept).Converse(context.Background(), unfiled())
+		finished, err := agents.New(provider, registry(), kept, agents.Turns).Converse(context.Background(), unfiled())
 		if !errors.Is(err, full) {
 			t.Fatalf("Converse() error = %v, want %v", err, full)
 		}
@@ -470,7 +495,7 @@ func TestConverseStopsWhenTheRecordCannotBeKept(t *testing.T) {
 		}}
 		kept := &recorder{id: "7", fail: full, failOn: 2}
 
-		finished, err := agents.New(provider, registry(), kept).Converse(context.Background(), unfiled())
+		finished, err := agents.New(provider, registry(), kept, agents.Turns).Converse(context.Background(), unfiled())
 		if !errors.Is(err, full) {
 			t.Fatalf("Converse() error = %v, want %v", err, full)
 		}

@@ -23,16 +23,17 @@
 // poor place to keep something that can only be tested through it.
 //
 // What is a caller's call arrives as an argument. Which model answers, which
-// tools are on offer and which engine keeps the record are handed to [New],
-// because a runtime that chose its own provider would be naming a vendor in
-// the core, and one that chose its own store would be naming an engine there.
-// The exchange is handed to [Type.Converse] rather than to [New], so the agent
-// is a thing that can be asked twice.
+// tools are on offer, which engine keeps the record and how many turns a run
+// may take are handed to [New], because a runtime that chose its own provider
+// would be naming a vendor in the core, and one that chose its own store would
+// be naming an engine there. The exchange is handed to [Type.Converse] rather
+// than to [New], so the agent is a thing that can be asked twice.
 //
-// The ceiling stays here, and it is the one bound that is not the caller's to
-// pick yet. An exchange that never ends spends without end, and a model that
-// keeps asking for tools is stopped loudly rather than left to run. [Turns] is
-// exported so that a caller can say what the bound is without guessing at it.
+// That the run has a ceiling at all is not the caller's call, only where it
+// sits. An exchange that never ends spends without end, and a model that keeps
+// asking for tools is stopped loudly rather than left to run; a caller with no
+// reason to move the bound names [Turns], which is exported so that saying so
+// is not guessing at a number.
 //
 // # When the record is written
 //
