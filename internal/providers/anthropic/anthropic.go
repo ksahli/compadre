@@ -11,6 +11,7 @@ import (
 	"github.com/ksahli/compadre/internal/core/inference"
 	"github.com/ksahli/compadre/internal/core/messages"
 	"github.com/ksahli/compadre/internal/core/roles"
+	"github.com/ksahli/compadre/internal/core/thoughts"
 	"github.com/ksahli/compadre/internal/core/threads"
 	"github.com/ksahli/compadre/internal/core/tools"
 	"github.com/ksahli/compadre/internal/core/tools/use"
@@ -64,9 +65,9 @@ var (
 )
 
 // blocks maps what a message says onto the content blocks the API expects,
-// in the order it said them. Arguments go out as they arrived: they are the
-// model's own JSON, and re-encoding them would be this adapter putting words
-// in its mouth.
+// in the order it said them. Arguments go out as they arrived, and so does
+// reasoning: both are the model's own, and re-encoding either would be this
+// adapter putting words in its mouth.
 func blocks(message messages.Type) []sdk.ContentBlockParamUnion {
 	blocks := []sdk.ContentBlockParamUnion{}
 	for _, content := range message.Content() {
@@ -80,11 +81,37 @@ func blocks(message messages.Type) []sdk.ContentBlockParamUnion {
 		if text, ok := content.Text(); ok && text != "" {
 			blocks = append(blocks, sdk.NewTextBlock(text))
 		}
+		// A thought goes back whole and unguarded, which is the one
+		// place the rule above does not hold: an API told to keep its
+		// reasoning to itself answers with a thought whose text is
+		// empty and whose signature is the whole of it, and that block
+		// is not nothing. It is also all or none — the API refuses a
+		// turn whose thinking has been rearranged, edited or partly
+		// dropped — so there is nothing here to be selective with.
+		if thought, ok := content.Thought(); ok {
+			if data, redacted := thought.Data(); redacted {
+				blocks = append(blocks, sdk.NewRedactedThinkingBlock(data))
+			} else {
+				blocks = append(blocks, sdk.NewThinkingBlock(thought.Signature(), thought.Text()))
+			}
+		}
 		if use, ok := content.Use(); ok {
 			blocks = append(blocks, sdk.NewToolUseBlock(use.ID(), use.Arguments(), use.Name()))
 		}
 		if result, ok := content.Result(); ok {
-			blocks = append(blocks, sdk.NewToolResultBlock(result.ID(), result.Content(), result.Failed()))
+			// A result the API will take, whatever the tool said.
+			// The SDK wraps the content in a text block, so an
+			// answer of nothing would be the empty block the API
+			// refuses — and dropping it is not the way out of
+			// that, since a call left with no answer is a turn no
+			// provider will continue. So the absence is said in
+			// words instead. Whether it was an answer or a failure
+			// is carried by the flag, as it always was.
+			said := result.Content()
+			if said == "" {
+				said = "the tool returned nothing"
+			}
+			blocks = append(blocks, sdk.NewToolResultBlock(result.ID(), said, result.Failed()))
 		}
 	}
 	return blocks
@@ -95,9 +122,27 @@ func blocks(message messages.Type) []sdk.ContentBlockParamUnion {
 // wire format it is not entitled to know; this is where it acquires one. A key
 // that is missing, or not the shape it should be, is left at its zero value
 // rather than guessed at — the same refusal as [blocks] and [reply].
+//
+// Two keys have fields here and the rest have none, which is not a reason to
+// leave them behind: a definition that wrote additionalProperties, or a $defs
+// its properties point at, wrote a contract, and sending a weaker one than the
+// tool declared is this adapter deciding what the tool meant. So they go out
+// as they came in. Only type is dropped, and only because the SDK spells it
+// itself and will not be told otherwise.
 func schema(definition map[string]any) sdk.ToolInputSchemaParam {
 	input := sdk.ToolInputSchemaParam{
 		Properties: definition["properties"],
+	}
+
+	for key, value := range definition {
+		switch key {
+		case "type", "properties", "required":
+			continue
+		}
+		if input.ExtraFields == nil {
+			input.ExtraFields = map[string]any{}
+		}
+		input.ExtraFields[key] = value
 	}
 
 	switch required := definition["required"].(type) {
@@ -144,14 +189,21 @@ func catalogue(registry tools.Registry) []sdk.ToolUnionParam {
 
 // parameters maps a thread and the tools on offer onto the request the API
 // expects. Roles become SDK messages; the thread's instructions become the
-// system prompt, which is where this API wants them. A role the core has that
-// this mapping does not cover is skipped rather than guessed at, and so is a
-// message that turns out to say nothing this adapter has a block for.
+// system prompt, which is where this API wants them. A message that turns out
+// to say nothing this adapter has a block for is skipped, because a turn that
+// said nothing is nothing to send.
+//
+// A role this mapping does not cover is refused instead. The core does not
+// constrain what a role is spelled as and the record round-trips whatever it
+// was given, so a turn can arrive under a word this adapter has no part for —
+// and leaving it out would send a conversation missing a turn that is sitting
+// in the record, which is a worse answer than saying so. It is the same
+// refusal [provider.Invoke] makes of a response that is no reply.
 //
 // It is a method rather than a function because the model and the ceiling are
 // what the adapter was built with, not something a thread carries: the core
 // has no vocabulary for either and should not grow one.
-func (p *provider) parameters(thread threads.Type, registry tools.Registry) sdk.MessageNewParams {
+func (p *provider) parameters(thread threads.Type, registry tools.Registry) (sdk.MessageNewParams, error) {
 	turns := []sdk.MessageParam{}
 	for _, message := range thread.Messages() {
 		content := blocks(message)
@@ -163,6 +215,9 @@ func (p *provider) parameters(thread threads.Type, registry tools.Registry) sdk.
 			turns = append(turns, sdk.NewUserMessage(content...))
 		case roles.Assistant:
 			turns = append(turns, sdk.NewAssistantMessage(content...))
+		default:
+			return sdk.MessageNewParams{}, fmt.Errorf(
+				"the exchange holds a turn taken by '%s', which this API has no part for", message.Role())
 		}
 	}
 
@@ -179,7 +234,7 @@ func (p *provider) parameters(thread threads.Type, registry tools.Registry) sdk.
 		}
 	}
 
-	return parameters
+	return parameters, nil
 }
 
 // provider is the adapter itself. It is unexported because callers hold the
@@ -193,12 +248,22 @@ type provider struct {
 // reply turns the response's content blocks into one assistant message
 // carrying all of them, in the order they arrived. Text arrives as itself; a
 // tool call arrives whole — id, name and the arguments as the model sent
-// them, which is what pairs the answer with the call later. A block this
-// mapping has no shape for is skipped rather than guessed at, an empty text
-// block is skipped because it says nothing and cannot be sent back, and a
-// response with nothing left after that is no message at all — which
-// [provider.Invoke] reports as an error, since it is the one holding an error
-// return.
+// them, which is what pairs the answer with the call later; and so does the
+// reasoning that led to either. A block this mapping has no shape for is
+// skipped rather than guessed at, an empty text block is skipped because it
+// says nothing and cannot be sent back, and a response with nothing left after
+// that is no message at all — which [provider.Invoke] reports as an error,
+// since it is the one holding an error return.
+//
+// Reasoning is kept for a reason unlike the others. Nothing in this runtime
+// reads a thought, and nothing displays one. It is kept because this API asks
+// for it back: a request is sent without a thinking parameter, which on the
+// models this adapter reaches means the model reasons, and a tool result
+// handed back without the reasoning that asked for the tool is a turn the API
+// will quietly carry on without — the model picking the thread up mid-thought
+// with the thought gone. That failure says nothing and shows up as a run that
+// went worse than it should have, which is exactly the kind of silence this
+// package is written to avoid.
 func reply(response *sdk.Message) []messages.Type {
 	content := []messages.Content{}
 	for _, block := range response.Content {
@@ -210,6 +275,15 @@ func reply(response *sdk.Message) []messages.Type {
 		// about turns written before this one existed.
 		if text, ok := block.AsAny().(sdk.TextBlock); ok && text.Text != "" {
 			content = append(content, messages.Text(text.Text))
+		}
+		// Both shapes reasoning comes in, and both go back unread.
+		// Keeping only the first would be the partial drop the API
+		// refuses outright.
+		if thought, ok := block.AsAny().(sdk.ThinkingBlock); ok {
+			content = append(content, messages.Thinking(thoughts.New(thought.Thinking, thought.Signature)))
+		}
+		if thought, ok := block.AsAny().(sdk.RedactedThinkingBlock); ok {
+			content = append(content, messages.Thinking(thoughts.Redacted(thought.Data)))
 		}
 		if tool, ok := block.AsAny().(sdk.ToolUseBlock); ok {
 			// Raw() is the argument JSON as sent, which is what
@@ -300,10 +374,16 @@ func failed(err error) error {
 // other and the caller's to act on. A request the API refuses comes back as an
 // error rather than as an empty reply, and so does a response that is no reply:
 // one the model stopped short of finishing, and one carrying nothing this
-// adapter has a shape for. Ending an exchange silently and ending it well look
+// adapter has a shape for. A thread this adapter cannot build a request from
+// is refused before the round trip is paid for. Ending an exchange silently and ending it well look
 // the same to a caller, which is reason enough not to let the first happen.
 func (p *provider) Invoke(ctx Context, thread threads.Type, registry tools.Registry) ([]messages.Type, error) {
-	response, err := p.client.Messages.New(ctx, p.parameters(thread, registry))
+	parameters, err := p.parameters(thread, registry)
+	if err != nil {
+		return nil, err
+	}
+
+	response, err := p.client.Messages.New(ctx, parameters)
 	if err != nil {
 		return nil, failed(err)
 	}

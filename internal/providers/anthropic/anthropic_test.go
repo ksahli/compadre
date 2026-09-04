@@ -13,6 +13,7 @@ import (
 
 	"github.com/ksahli/compadre/internal/core/messages"
 	"github.com/ksahli/compadre/internal/core/roles"
+	"github.com/ksahli/compadre/internal/core/thoughts"
 	"github.com/ksahli/compadre/internal/core/threads"
 	"github.com/ksahli/compadre/internal/core/tools"
 	"github.com/ksahli/compadre/internal/core/tools/definitions"
@@ -50,6 +51,9 @@ type request struct {
 type contentBlock struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text"`
+	Thinking  string          `json:"thinking"`
+	Signature string          `json:"signature"`
+	Data      string          `json:"data"`
 	ID        string          `json:"id"`
 	Name      string          `json:"name"`
 	Input     json.RawMessage `json:"input"`
@@ -73,9 +77,18 @@ func text(content string) string {
 // with, the tool's name, and the arguments the model chose.
 var toolUse = `{"type":"tool_use","id":"toolu_1","name":"read_file","input":{"path":"go.mod"}}`
 
-// thinking is a block this adapter has no shape for, and so the case that
-// pins what happens to one: it is skipped rather than guessed at.
-var thinking = `{"type":"thinking","thinking":"hmm","signature":"sig"}`
+// thinking is the model reasoning before it answers, and redacted is the
+// same with the reasoning withheld. Both are carried rather than read.
+var (
+	thinking = `{"type":"thinking","thinking":"hmm","signature":"sig"}`
+	silent   = `{"type":"thinking","thinking":"","signature":"sig"}`
+	redacted = `{"type":"redacted_thinking","data":"blob"}`
+)
+
+// unshaped is a block this adapter has no shape for, and so the case that
+// pins what happens to one: it is skipped rather than guessed at. A server
+// tool is a real one to pick, since this adapter offers none.
+var unshaped = `{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}}`
 
 // reply is a whole response: the envelope every message carries, with the
 // given content blocks inside it.
@@ -147,6 +160,12 @@ func said(content messages.Content) string {
 	if text, ok := content.Text(); ok {
 		return "text:" + text
 	}
+	if thought, ok := content.Thought(); ok {
+		if data, redacted := thought.Data(); redacted {
+			return "redacted:" + data
+		}
+		return "thinking:" + thought.Text() + ":" + thought.Signature()
+	}
 	if use, ok := content.Use(); ok {
 		return "use:" + use.ID() + ":" + use.Name() + ":" + string(use.Arguments())
 	}
@@ -185,6 +204,10 @@ func block(b contentBlock) string {
 	switch b.Type {
 	case "text":
 		return "text:" + b.Text
+	case "thinking":
+		return "thinking:" + b.Thinking + ":" + b.Signature
+	case "redacted_thinking":
+		return "redacted:" + b.Data
 	case "tool_use":
 		return "use:" + b.ID + ":" + b.Name + ":" + string(b.Input)
 	case "tool_result":
@@ -220,6 +243,7 @@ func TestParameters(t *testing.T) {
 		registry tools.Registry
 		system   string
 		turns    []turn
+		refused  string // what the adapter says where it will not build a request at all
 	}{
 		{
 			name:   "a user turn",
@@ -315,16 +339,70 @@ func TestParameters(t *testing.T) {
 			turns: []turn{{"user", "result:toolu_1:ok:module compadre|result:toolu_2:failed:no such file"}},
 		},
 		{
-			// A role the mapping does not cover is dropped rather than
-			// guessed at, and the turns around it are unaffected.
-			name: "an unmappable role is skipped",
+			// Reasoning goes back the way it came, ahead of the
+			// call it led to: it is the model's, the API asks for
+			// it back, and a call handed over without it is a
+			// thought the model has to have again.
+			name: "reasoning goes back with the call it led to",
+			thread: threads.New("",
+				messages.New(roles.Assistant,
+					messages.Thinking(thoughts.New("hmm", "sig")),
+					messages.Use(use.New("toolu_1", "read_file", use.Arguments(`{"path":"go.mod"}`))),
+				),
+			),
+			turns: []turn{{"assistant", `thinking:hmm:sig|use:toolu_1:read_file:{"path":"go.mod"}`}},
+		},
+		{
+			// The guard the text path has is exactly wrong here.
+			// An API keeping its reasoning to itself answers with
+			// a thought that is a signature and nothing else, and
+			// dropping that is the partial drop the API refuses.
+			name: "reasoning with nothing written in it still goes back",
+			thread: threads.New("",
+				messages.New(roles.Assistant,
+					messages.Thinking(thoughts.New("", "sig")),
+					messages.Text("hello"),
+				),
+			),
+			turns: []turn{{"assistant", "thinking::sig|text:hello"}},
+		},
+		{
+			name: "reasoning that was withheld goes back as the blob it is",
+			thread: threads.New("",
+				messages.New(roles.Assistant,
+					messages.Thinking(thoughts.Redacted("blob")),
+					messages.Text("hello"),
+				),
+			),
+			turns: []turn{{"assistant", "redacted:blob|text:hello"}},
+		},
+		{
+			// A result the tool had nothing to say for is still
+			// the answer to a call, and a call with no answer is a
+			// turn no provider will continue. So it is said in
+			// words rather than sent as the empty block the API
+			// refuses.
+			name: "a result with nothing in it is said rather than sent empty",
+			thread: threads.New("",
+				messages.New(roles.User,
+					messages.Result(results.New("toolu_1", "", false)),
+				),
+			),
+			turns: []turn{{"user", "result:toolu_1:ok:the tool returned nothing"}},
+		},
+		{
+			// A role the mapping does not cover ends the run
+			// before the round trip is paid for. Leaving it out
+			// would send a conversation missing a turn that is
+			// sitting in the record, and nobody would be told.
+			name: "an unmappable role is refused",
 			thread: threads.New("",
 				messages.New(roles.User, messages.Text("a")),
 				// Not one of the roles constants: that is the point.
 				messages.New("Stranger", messages.Text("unmappable")),
 				messages.New(roles.User, messages.Text("c")),
 			),
-			turns: []turn{{"user", "text:a"}, {"user", "text:c"}},
+			refused: "Stranger",
 		},
 		{
 			// A turn with nothing in it is not sent: the API has no
@@ -347,9 +425,22 @@ func TestParameters(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			captured, _, options := stub(t, reply(text("hola")))
+			captured, calls, options := stub(t, reply(text("hola")))
 
-			if _, err := anthropic.New("", 0, options...).Invoke(context.Background(), c.thread, c.registry); err != nil {
+			_, err := anthropic.New("", 0, options...).Invoke(context.Background(), c.thread, c.registry)
+			if c.refused != "" {
+				if err == nil {
+					t.Fatalf("Invoke() error = nil, want an error")
+				}
+				if !strings.Contains(err.Error(), c.refused) {
+					t.Errorf("Invoke() error = %q, want it to mention %q", err, c.refused)
+				}
+				if *calls != 0 {
+					t.Errorf("server was asked %d times, want 0: the request was never sendable", *calls)
+				}
+				return
+			}
+			if err != nil {
 				t.Fatalf("Invoke() error = %v, want nil", err)
 			}
 
@@ -400,6 +491,11 @@ func TestParametersOffersTheRegistry(t *testing.T) {
 				"location": map[string]any{"type": "string"},
 			},
 			"required": []string{"location"},
+			// Keys this mapping has no field for. They are part
+			// of the contract the tool wrote and go out as they
+			// were written.
+			"additionalProperties": false,
+			"$defs":                map[string]any{"place": map[string]any{"type": "string"}},
 		},
 	}
 	clock := definition{
@@ -441,7 +537,13 @@ func TestParametersOffersTheRegistry(t *testing.T) {
 				Type string `json:"type"`
 			} `json:"location"`
 		} `json:"properties"`
-		Required []string `json:"required"`
+		Required             []string `json:"required"`
+		AdditionalProperties *bool    `json:"additionalProperties"`
+		Defs                 struct {
+			Place struct {
+				Type string `json:"type"`
+			} `json:"place"`
+		} `json:"$defs"`
 	}
 	if err := json.Unmarshal(captured.Tools[1].InputSchema, &schema); err != nil {
 		t.Fatalf("decoding input_schema: %v", err)
@@ -454,6 +556,15 @@ func TestParametersOffersTheRegistry(t *testing.T) {
 	}
 	if want := []string{"location"}; !slices.Equal(schema.Required, want) {
 		t.Errorf("input_schema required = %v, want %v", schema.Required, want)
+	}
+
+	// The rest of what the tool wrote is the rest of the contract, and a
+	// weaker one than the tool declared is not this adapter's to send.
+	if schema.AdditionalProperties == nil || *schema.AdditionalProperties {
+		t.Errorf("input_schema = %s, want the additionalProperties the tool wrote", captured.Tools[1].InputSchema)
+	}
+	if schema.Defs.Place.Type != "string" {
+		t.Errorf("input_schema = %s, want the $defs the tool wrote", captured.Tools[1].InputSchema)
 	}
 }
 
@@ -571,9 +682,27 @@ func TestInvoke(t *testing.T) {
 			// A block this mapping has no shape for is skipped, and
 			// the blocks around it are unaffected.
 			name:    "a block with no shape is skipped",
-			blocks:  []string{text("a"), thinking, text("b")},
+			blocks:  []string{text("a"), unshaped, text("b")},
 			replies: 1,
 			want:    []string{"text:a", "text:b"},
+		},
+		{
+			// Reasoning is kept, in place, whether it was written
+			// out or withheld: the API wants it back with the
+			// answer to the call it led to.
+			name:    "reasoning is kept in the order it arrived",
+			blocks:  []string{thinking, text("a"), toolUse},
+			replies: 1,
+			want:    []string{"thinking:hmm:sig", "text:a", `use:toolu_1:read_file:{"path":"go.mod"}`},
+		},
+		{
+			// The empty text guard stops at the text: a thought
+			// with a signature and nothing else is the whole of
+			// what an API keeping its reasoning to itself returns.
+			name:    "reasoning with nothing written in it is kept",
+			blocks:  []string{silent, redacted, text("a")},
+			replies: 1,
+			want:    []string{"thinking::sig", "redacted:blob", "text:a"},
 		},
 		{
 			// An empty text block says nothing and cannot be sent
@@ -655,7 +784,7 @@ func TestInvokeRefusesANonReply(t *testing.T) {
 			// A response that is nothing but blocks this mapping
 			// has no shape for is likewise no reply.
 			name:   "nothing but blocks with no shape",
-			body:   reply(thinking),
+			body:   reply(unshaped),
 			reason: "nothing to read",
 		},
 		{

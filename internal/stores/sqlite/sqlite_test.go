@@ -2,6 +2,7 @@ package sqlite_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"slices"
@@ -11,10 +12,13 @@ import (
 	"github.com/ksahli/compadre/internal/core/exchanges"
 	"github.com/ksahli/compadre/internal/core/messages"
 	"github.com/ksahli/compadre/internal/core/roles"
+	"github.com/ksahli/compadre/internal/core/thoughts"
 	"github.com/ksahli/compadre/internal/core/threads"
 	"github.com/ksahli/compadre/internal/core/tools"
 	"github.com/ksahli/compadre/internal/core/tools/use"
 	"github.com/ksahli/compadre/internal/stores/sqlite"
+
+	_ "modernc.org/sqlite"
 )
 
 // said renders one content block as a line a case can state, naming the shape
@@ -23,6 +27,12 @@ import (
 func said(content messages.Content) string {
 	if text, ok := content.Text(); ok {
 		return "text:" + text
+	}
+	if thought, ok := content.Thought(); ok {
+		if data, redacted := thought.Data(); redacted {
+			return "redacted:" + data
+		}
+		return "thinking:" + thought.Text() + ":" + thought.Signature()
 	}
 	if request, ok := content.Use(); ok {
 		return "use:" + request.ID() + ":" + request.Name() + ":" + string(request.Arguments())
@@ -97,6 +107,24 @@ func TestSaveAndLoad(t *testing.T) {
 				`Assistant(text:let me look|use:toolu_1:weather:{"city":"Paris"}|use:toolu_2:weather:{"city":"Nice"})`,
 				"User(result:toolu_1:ok:17C|result:toolu_2:failed:no such city)",
 				"Assistant(text:17C in Paris)",
+			},
+		},
+		{
+			// Reasoning is written down unread and comes back
+			// unread, empty text and all: what the model handed
+			// over is what the record has to hand back, or the
+			// turn cannot be carried on.
+			name: "the reasoning behind a call, written and withheld",
+			thread: threads.New("",
+				messages.New(roles.Assistant,
+					messages.Thinking(thoughts.New("hmm", "sig")),
+					messages.Thinking(thoughts.New("", "sig2")),
+					messages.Thinking(thoughts.Redacted("blob")),
+					messages.Use(use.New("toolu_1", "weather", use.Arguments(`{"city":"Paris"}`))),
+				),
+			),
+			want: []string{
+				`Assistant(thinking:hmm:sig|thinking::sig2|redacted:blob|use:toolu_1:weather:{"city":"Paris"})`,
 			},
 		},
 		{
@@ -314,6 +342,89 @@ func TestNewOnAnExistingStore(t *testing.T) {
 		t.Fatalf("Load() error = %v, want nil", err)
 	}
 	if got, want := record(loaded.Thread()), []string{"User(text:hello)"}; !slices.Equal(got, want) {
+		t.Errorf("thread = %v, want %v", got, want)
+	}
+}
+
+// TestNewOnAStoreFiledBeforeThinking pins the one migration this package
+// carries. A database made before thinking was a content shape has the CHECK
+// it was made with, and CREATE TABLE IF NOT EXISTS will not touch it — so
+// opening it has to widen it, keep every turn already filed, and take the
+// shape that could not be written before.
+func TestNewOnAStoreFiledBeforeThinking(t *testing.T) {
+	path, ctx := filepath.Join(t.TempDir(), "exchanges.db"), context.Background()
+
+	// The schema as it was, written out rather than kept around, so that
+	// what this test is about cannot drift into agreeing with itself.
+	const before = `
+		CREATE TABLE threads (
+		    id           INTEGER PRIMARY KEY,
+		    instructions TEXT NOT NULL,
+		    opened_at    TEXT NOT NULL
+		) STRICT;
+		CREATE TABLE messages (
+		    id      INTEGER PRIMARY KEY,
+		    thread  INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+		    ordinal INTEGER NOT NULL,
+		    role    TEXT NOT NULL,
+		    UNIQUE (thread, ordinal)
+		) STRICT;
+		CREATE TABLE contents (
+		    id        INTEGER PRIMARY KEY,
+		    message   INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+		    ordinal   INTEGER NOT NULL,
+		    kind      TEXT NOT NULL CHECK (kind IN ('text', 'use', 'result')),
+		    text      TEXT,
+		    call      TEXT,
+		    tool      TEXT,
+		    arguments TEXT,
+		    content   TEXT,
+		    failed    INTEGER,
+		    UNIQUE (message, ordinal)
+		) STRICT;
+		INSERT INTO threads (id, instructions, opened_at) VALUES (1, 'be brief', '2026-01-01T00:00:00Z');
+		INSERT INTO messages (id, thread, ordinal, role) VALUES (1, 1, 0, 'User');
+		INSERT INTO contents (message, ordinal, kind, text) VALUES (1, 0, 'text', 'hello');`
+
+	filed, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("opening the old store: %v", err)
+	}
+	if _, err := filed.Exec(before); err != nil {
+		t.Fatalf("writing the old store: %v", err)
+	}
+	if err := filed.Close(); err != nil {
+		t.Fatalf("closing the old store: %v", err)
+	}
+
+	store, err := sqlite.New(path)
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+	defer store.Close()
+
+	loaded, err := store.Load(ctx, "1")
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if got, want := record(loaded.Thread()), []string{"User(text:hello)"}; !slices.Equal(got, want) {
+		t.Errorf("thread = %v, want %v: the rebuild kept what was filed", got, want)
+	}
+
+	carried := loaded.With(loaded.Thread().Append(
+		messages.New(roles.Assistant, messages.Thinking(thoughts.New("hmm", "sig"))),
+	))
+	saved, err := store.Save(ctx, carried)
+	if err != nil {
+		t.Fatalf("Save() error = %v, want nil: the widened record takes a thought", err)
+	}
+
+	again, err := store.Load(ctx, saved.ID())
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	want := []string{"User(text:hello)", "Assistant(thinking:hmm:sig)"}
+	if got := record(again.Thread()); !slices.Equal(got, want) {
 		t.Errorf("thread = %v, want %v", got, want)
 	}
 }

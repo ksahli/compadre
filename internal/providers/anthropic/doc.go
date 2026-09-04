@@ -11,6 +11,15 @@
 // Everything the port has no shape for — usage among it — is dropped on the
 // way through.
 //
+// The model's own reasoning is not among that. No thinking parameter is sent,
+// which on the models this adapter reaches is what leaves the model reasoning,
+// and the API expects the blocks it reasoned in handed back with the answer to
+// the tool they asked for. So they are carried: read into
+// [github.com/ksahli/compadre/internal/core/messages.Thinking], written down
+// with the turn, and sent again unread and unedited, because a thought this
+// package rewrote is one the API refuses and a thought it dropped is one the
+// model has to think again.
+//
 // What is not dropped is a turn that never became an answer. A status code
 // that says the API would not take the request, and a stop reason that says
 // the model stopped short of finishing one, are both this vendor accounting

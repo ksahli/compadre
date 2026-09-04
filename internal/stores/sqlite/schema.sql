@@ -36,8 +36,11 @@ CREATE TABLE IF NOT EXISTS contents (
     id        INTEGER PRIMARY KEY,
     message   INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     ordinal   INTEGER NOT NULL,
-    kind      TEXT NOT NULL CHECK (kind IN ('text', 'use', 'result')),
+    kind      TEXT NOT NULL CHECK (kind IN ('text', 'use', 'result', 'thinking', 'redacted')),
     text      TEXT,     -- kind = 'text': what was said
+                        -- kind = 'thinking': the reasoning, often nothing at all
+                        -- kind = 'redacted': the opaque blob, which is all there is
+    signature TEXT,     -- kind = 'thinking': the model's proof it wrote the block
     call      TEXT,     -- kinds 'use' and 'result': the id that pairs them
     tool      TEXT,     -- kind = 'use': which tool
     arguments TEXT,     -- kind = 'use': the raw JSON, unparsed here as anywhere

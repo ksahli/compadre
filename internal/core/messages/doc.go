@@ -4,8 +4,13 @@
 // takes in the exchange, and what it says. What it says is a list of content
 // blocks rather than a single value, because one turn is often several things
 // at once — a sentence and the tool call it leads to, or every result a round
-// of calls produced. [Text], [Use] and [Result] are the shapes a block comes
-// in, and the set is closed: only this package can widen it.
+// of calls produced. [Text], [Thinking], [Use] and [Result] are the shapes a
+// block comes in, and the set is closed: only this package can widen it.
+//
+// [Thinking] is the odd one: nothing in the core reads a thought, and nothing
+// in the core ever will. It is carried because the API that produced it wants
+// it back — a turn handed on without its reasoning is a turn the model has to
+// begin again — so the core keeps it whole and hands it on unread.
 //
 // A reply arrives whole rather than as it is produced. [New] is the only way
 // to build a message, and it does not constrain the role — the constants in
