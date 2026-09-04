@@ -12,6 +12,7 @@ import (
 
 	"github.com/ksahli/compadre/internal/core/exchanges"
 	"github.com/ksahli/compadre/internal/core/messages"
+	"github.com/ksahli/compadre/internal/core/roles"
 	"github.com/ksahli/compadre/internal/core/threads"
 	"github.com/ksahli/compadre/internal/core/tools/results"
 	"github.com/ksahli/compadre/internal/core/tools/use"
@@ -161,7 +162,7 @@ func open(ctx Context, tx *sql.Tx, exchange Exchange) (int64, int, error) {
 func write(ctx Context, tx *sql.Tx, thread int64, ordinal int, message Message) error {
 	row, err := tx.ExecContext(ctx,
 		`INSERT INTO messages (thread, ordinal, role) VALUES (?, ?, ?)`,
-		thread, ordinal, message.Role())
+		thread, ordinal, message.Role().String())
 	if err != nil {
 		return fmt.Errorf("could not write turn %d of the exchange: %w", ordinal, err)
 	}
@@ -278,7 +279,11 @@ func read(ctx Context, db *sql.DB, thread int64) ([]Message, error) {
 		}
 
 		if current != 0 && message != current {
-			conversation = append(conversation, messages.New(role, content...))
+			turn, err := taken(role, content)
+			if err != nil {
+				return nil, err
+			}
+			conversation = append(conversation, turn)
 			content = []Content{}
 		}
 		current, role = message, said
@@ -301,10 +306,27 @@ func read(ctx Context, db *sql.DB, thread int64) ([]Message, error) {
 	}
 
 	if current != 0 {
-		conversation = append(conversation, messages.New(role, content...))
+		turn, err := taken(role, content)
+		if err != nil {
+			return nil, err
+		}
+		conversation = append(conversation, turn)
 	}
 
 	return conversation, nil
+}
+
+// taken rebuilds one turn from the role it was filed under and the blocks
+// read back for it. The role is a word on the way in and a value on the way
+// out, and this is where it crosses: a row filed under a word the core has no
+// role for is refused here, at the edge it came in by, rather than carried on
+// as a turn no provider can place.
+func taken(role string, content []Content) (Message, error) {
+	part, err := roles.Parse(role)
+	if err != nil {
+		return Message{}, fmt.Errorf("could not read a turn of the exchange: %w", err)
+	}
+	return messages.New(part, content...), nil
 }
 
 // block turns one row back into the content it was written from.

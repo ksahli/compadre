@@ -3,6 +3,7 @@ package messages
 import (
 	"slices"
 
+	"github.com/ksahli/compadre/internal/core/roles"
 	"github.com/ksahli/compadre/internal/core/tools/results"
 	"github.com/ksahli/compadre/internal/core/tools/use"
 )
@@ -69,11 +70,11 @@ func Result(answer results.Type) Content {
 // several things at once — a sentence and the tool call it leads to, or every
 // result a round of calls produced.
 type Type struct {
-	role    string
+	role    roles.Type
 	content []Content
 }
 
-func (message Type) Role() string {
+func (message Type) Role() roles.Type {
 	return message.role
 }
 
@@ -85,10 +86,11 @@ func (message Type) Content() []Content {
 
 // New builds a message from the part it takes and what it says. The content
 // is copied, so a caller that keeps hold of the slice it passed in cannot
-// reach back into the message with it. The role is not constrained: the
-// constants in [github.com/ksahli/compadre/internal/core/roles] are what the
-// core spells its own roles with, not a closed set.
-func New(role string, content ...Content) Type {
+// reach back into the message with it. The role is a closed set — see
+// [github.com/ksahli/compadre/internal/core/roles] — so the only turn that
+// can be built without a part to take is one under the zero role, which is a
+// turn nobody can place and which the providers refuse.
+func New(role roles.Type, content ...Content) Type {
 	message := Type{
 		role:    role,
 		content: slices.Clone(content),

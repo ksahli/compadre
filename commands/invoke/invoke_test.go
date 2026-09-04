@@ -274,7 +274,7 @@ func said(thread threads.Type) []string {
 	for _, message := range thread.Messages() {
 		for _, content := range message.Content() {
 			if text, ok := content.Text(); ok {
-				turns = append(turns, message.Role()+": "+text)
+				turns = append(turns, message.Role().String()+": "+text)
 			}
 		}
 	}

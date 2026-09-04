@@ -14,9 +14,9 @@
 // the port has no shape for.
 //
 // A reply arrives whole rather than as it is produced. [New] is the only way
-// to build a message, and it does not constrain the role — the constants in
-// [github.com/ksahli/compadre/internal/core/roles] are what the core spells
-// its own roles with, not a closed set.
+// to build a message, and the role it takes is a closed set — the values in
+// [github.com/ksahli/compadre/internal/core/roles] are the whole of what a
+// turn can be taken by, and no caller can spell another.
 //
 // Content is read by asking, not by switching: each accessor answers whether
 // the block is that shape, so a block of the wrong kind cannot be mistaken

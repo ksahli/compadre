@@ -179,20 +179,20 @@ func catalogue(registry tools.Registry) []sdk.ToolUnionParam {
 // to say nothing this adapter has a block for is skipped, because a turn that
 // said nothing is nothing to send.
 //
-// A role this mapping does not cover is refused instead. The core does not
-// constrain what a role is spelled as and the record round-trips whatever it
-// was given, so a turn can arrive under a word this adapter has no part for —
-// and leaving it out would send a conversation missing a turn that is sitting
-// in the record, which is a worse answer than saying so. It is the same
-// refusal [provider.Invoke] makes of a response that is no reply.
+// A turn with no role this mapping covers is refused instead. The roles the
+// core has are a closed set and both have a part here, so what reaches the
+// default arm is the zero role: a turn built without a part to take. Leaving
+// it out would send a conversation missing a turn that is sitting in the
+// record, which is a worse answer than saying so. It is the same refusal
+// [provider.Invoke] makes of a response that is no reply.
 //
 // The two are settled in that order, and the order is the whole of it. Whether
 // a turn can be placed at all is a question about the record; whether it said
 // anything is a question about its contents. Asking the second one first lets
-// the skip swallow the refusal: a turn under a word this adapter has no part
-// for would go quietly whenever it happened to leave [blocks] with nothing,
-// and that is not only the empty turn, since [blocks] has arms for four kinds
-// of content and drops whatever it cannot map.
+// the skip swallow the refusal: a turn nobody can place would go quietly
+// whenever it happened to leave [blocks] with nothing, and that is not only
+// the empty turn, since [blocks] has arms for four kinds of content and drops
+// whatever it cannot map.
 //
 // It is a method rather than a function because the model and the ceiling are
 // what the adapter was built with, not something a thread carries: the core
@@ -207,8 +207,8 @@ func (p *provider) parameters(thread threads.Type, registry tools.Registry) (sdk
 		case roles.Assistant:
 			turn = sdk.NewAssistantMessage
 		default:
-			return sdk.MessageNewParams{}, fmt.Errorf(
-				"the exchange holds a turn taken by '%s', which this API has no part for", message.Role())
+			return sdk.MessageNewParams{}, errors.New(
+				"the exchange holds a turn taken by nobody, which this API has no part for")
 		}
 
 		content := blocks(message)

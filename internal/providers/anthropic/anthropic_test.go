@@ -340,18 +340,18 @@ func TestParameters(t *testing.T) {
 			turns: []turn{{"user", "result:toolu_1:ok:the tool returned nothing"}},
 		},
 		{
-			// A role the mapping does not cover ends the run
+			// A turn the mapping cannot place ends the run
 			// before the round trip is paid for. Leaving it out
 			// would send a conversation missing a turn that is
 			// sitting in the record, and nobody would be told.
 			name: "an unmappable role is refused",
 			thread: threads.New("",
 				messages.New(roles.User, messages.Text("a")),
-				// Not one of the roles constants: that is the point.
-				messages.New("Stranger", messages.Text("unmappable")),
+				// The zero role: no part taken, which is the point.
+				messages.New(roles.Type{}, messages.Text("unmappable")),
 				messages.New(roles.User, messages.Text("c")),
 			),
-			refused: "Stranger",
+			refused: "taken by nobody",
 		},
 		{
 			// The half of the refusal the emptiness skip used to
@@ -362,10 +362,10 @@ func TestParameters(t *testing.T) {
 			name: "an unmappable role with nothing in it is still refused",
 			thread: threads.New("",
 				messages.New(roles.User, messages.Text("a")),
-				messages.New("Stranger"),
+				messages.New(roles.Type{}),
 				messages.New(roles.User, messages.Text("c")),
 			),
-			refused: "Stranger",
+			refused: "taken by nobody",
 		},
 		{
 			// And the shape that actually arrives from a record
@@ -375,10 +375,10 @@ func TestParameters(t *testing.T) {
 			name: "an unmappable role saying nothing sendable is still refused",
 			thread: threads.New("",
 				messages.New(roles.User, messages.Text("a")),
-				messages.New("Stranger", messages.Text("")),
+				messages.New(roles.Type{}, messages.Text("")),
 				messages.New(roles.User, messages.Text("c")),
 			),
-			refused: "Stranger",
+			refused: "taken by nobody",
 		},
 		{
 			// A turn with nothing in it is not sent: the API has no

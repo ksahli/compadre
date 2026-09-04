@@ -2,6 +2,7 @@ package sqlite_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"slices"
@@ -45,7 +46,7 @@ func record(thread threads.Type) []string {
 		for _, content := range message.Content() {
 			blocks = append(blocks, said(content))
 		}
-		got = append(got, message.Role()+"("+strings.Join(blocks, "|")+")")
+		got = append(got, message.Role().String()+"("+strings.Join(blocks, "|")+")")
 	}
 	return got
 }
@@ -55,13 +56,23 @@ func record(thread threads.Type) []string {
 func open(t *testing.T) *sqlite.Store {
 	t.Helper()
 
-	store, err := sqlite.New(filepath.Join(t.TempDir(), "exchanges.db"))
+	store, _ := opened(t)
+	return store
+}
+
+// opened is [open] with the path handed back, for the one test that has to go
+// behind the store and write a row it would never write itself.
+func opened(t *testing.T) (*sqlite.Store, string) {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "exchanges.db")
+	store, err := sqlite.New(path)
 	if err != nil {
 		t.Fatalf("New() error = %v, want nil", err)
 	}
 	t.Cleanup(func() { store.Close() })
 
-	return store
+	return store, path
 }
 
 func TestSaveAndLoad(t *testing.T) {
@@ -315,5 +326,34 @@ func TestNewOnAnExistingStore(t *testing.T) {
 	}
 	if got, want := record(loaded.Thread()), []string{"User(text:hello)"}; !slices.Equal(got, want) {
 		t.Errorf("thread = %v, want %v", got, want)
+	}
+}
+
+// TestLoadOfATurnTakenByNobody pins what a record written by something else
+// gets: the role column is text, so a row can hold a word the core has no role
+// for, and reading it as a turn would carry that word into a thread nothing
+// downstream can place. It is refused at the read instead, where the bad value
+// came in.
+func TestLoadOfATurnTakenByNobody(t *testing.T) {
+	store, path := opened(t)
+	ctx := context.Background()
+
+	saved, err := store.Save(ctx, exchanges.Open(threads.New("",
+		messages.New(roles.User, messages.Text("hello")))))
+	if err != nil {
+		t.Fatalf("Save() error = %v, want nil", err)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v, want nil", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE messages SET role = 'Stranger'`); err != nil {
+		t.Fatalf("UPDATE error = %v, want nil", err)
+	}
+
+	if _, err := store.Load(ctx, saved.ID()); !errors.Is(err, roles.ErrUnknown) {
+		t.Errorf("Load() error = %v, want %v", err, roles.ErrUnknown)
 	}
 }

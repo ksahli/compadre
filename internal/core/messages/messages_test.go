@@ -34,7 +34,7 @@ func TestNew(t *testing.T) {
 	cases := []struct {
 		name    string
 		message messages.Type
-		role    string
+		role    roles.Type
 		content []block
 	}{
 		{
@@ -139,12 +139,13 @@ func TestNew(t *testing.T) {
 			content: nil,
 		},
 		{
-			// New does not constrain the role, and the anthropic adapter
-			// leans on that: its mapping has a branch for a role it does
-			// not cover, which nothing could reach otherwise.
-			name:    "a role outside the constants",
-			message: messages.New("Stranger", messages.Text("x")),
-			role:    "Stranger",
+			// The roles are a closed set, so the only turn that can be
+			// built without a part to take is one under the zero role.
+			// It is what the anthropic adapter's mapping has a branch
+			// for: a turn nobody can place.
+			name:    "a turn taken by nobody",
+			message: messages.New(roles.Type{}, messages.Text("x")),
+			role:    roles.Type{},
 			content: []block{text("x")},
 		},
 	}

@@ -17,7 +17,7 @@ func said(thread threads.Type) []string {
 	for _, message := range thread.Messages() {
 		for _, content := range message.Content() {
 			if text, ok := content.Text(); ok {
-				got = append(got, message.Role()+":"+text)
+				got = append(got, message.Role().String()+":"+text)
 			}
 		}
 	}

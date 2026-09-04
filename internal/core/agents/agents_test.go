@@ -129,7 +129,7 @@ func record(thread threads.Type) []string {
 		for _, content := range message.Content() {
 			blocks = append(blocks, said(content))
 		}
-		got = append(got, message.Role()+"("+strings.Join(blocks, "|")+")")
+		got = append(got, message.Role().String()+"("+strings.Join(blocks, "|")+")")
 	}
 	return got
 }
