@@ -11,14 +11,14 @@
 // Everything the port has no shape for — usage among it — is dropped on the
 // way through.
 //
-// The model's own reasoning is not among that. No thinking parameter is sent,
-// which on the models this adapter reaches is what leaves the model reasoning,
-// and the API expects the blocks it reasoned in handed back with the answer to
-// the tool they asked for. So they are carried: read into
-// [github.com/ksahli/compadre/internal/core/messages.Thinking], written down
-// with the turn, and sent again unread and unedited, because a thought this
-// package rewrote is one the API refuses and a thought it dropped is one the
-// model has to think again.
+// The model's own reasoning is among what is dropped, and deliberately. No
+// thinking parameter is sent, which on the models this adapter reaches is what
+// leaves the model reasoning, so the blocks it reasoned in do arrive. They are
+// this API's own vocabulary and not the port's, and carrying them would mean
+// naming them in the core and in the record, which is a vendor's idea in the
+// one place that is meant to have none. So they are read and let go, and the
+// turn goes back without them. The API takes such a turn: it strips what no
+// longer makes a whole one and carries on unreasoned.
 //
 // What is not dropped is a turn that never became an answer. A status code
 // that says the API would not take the request, and a stop reason that says

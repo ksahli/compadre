@@ -36,21 +36,13 @@
 // Tool arguments stay raw JSON, unparsed, because they are unparsed
 // everywhere else too: the core does not know any tool's parameters and the
 // record of a call has no more business guessing at them than the call did.
-// The model's own reasoning is kept the same way and for the same reason: it
-// is written down unread, signature and all, because the API it came from
-// expects it back and a turn handed on without it is a turn begun again.
 //
-// # Widening the closed set
-//
-// The schema is applied with CREATE TABLE IF NOT EXISTS, which is what makes
-// opening a fresh store and opening an old one the same call — and what means
-// a table already on disk keeps the CHECK it was made with. Adding a shape to
-// the content set is therefore the one change that cannot be made by editing
-// schema.sql alone, since SQLite has no ALTER for a CHECK. [New] closes that
-// gap by reading the table's own definition and rebuilding it once where it is
-// the old one; see rebuild.sql. It is the smallest amount of migration
-// machinery that keeps the promise the rest of this schema makes, which is
-// that a record filed by an earlier version can still be carried on.
+// The set the CHECK holds closed is the core's, which means changing it is the
+// one change editing schema.sql cannot make on its own: CREATE TABLE IF NOT
+// EXISTS leaves a table already on disk exactly as it was, CHECK and all, and
+// SQLite has no ALTER for one. There is no migration machinery here to close
+// that gap. A record filed under a definition this one no longer writes is a
+// record to start again from, not one to rebuild.
 //
 // # Writing
 //

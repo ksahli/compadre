@@ -8,12 +8,10 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/ksahli/compadre/internal/core/exchanges"
 	"github.com/ksahli/compadre/internal/core/messages"
-	"github.com/ksahli/compadre/internal/core/thoughts"
 	"github.com/ksahli/compadre/internal/core/threads"
 	"github.com/ksahli/compadre/internal/core/tools/results"
 	"github.com/ksahli/compadre/internal/core/tools/use"
@@ -31,18 +29,13 @@ type (
 //go:embed schema.sql
 var schema string
 
-//go:embed rebuild.sql
-var rebuild string
-
 // The shapes a content block can be, spelled the way the CHECK in schema.sql
 // spells them. They are the schema's own words rather than the core's, which
 // is why they live here and not in messages.
 const (
-	kindText     = "text"
-	kindThinking = "thinking"
-	kindRedacted = "redacted"
-	kindUse      = "use"
-	kindResult   = "result"
+	kindText   = "text"
+	kindUse    = "use"
+	kindResult = "result"
 )
 
 // Store keeps exchanges in a SQLite database.
@@ -68,45 +61,7 @@ func New(path string) (*Store, error) {
 		return nil, fmt.Errorf("could not prepare the store at '%s': %w", path, err)
 	}
 
-	if err := widen(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("could not prepare the store at '%s': %w", path, err)
-	}
-
 	return &Store{db: db}, nil
-}
-
-// widen brings a database written before thinking was a content shape up to
-// the schema this package now applies, and leaves one that is already there
-// alone.
-//
-// It exists because the schema is applied with CREATE TABLE IF NOT EXISTS,
-// which leaves an existing table exactly as it was, CHECK and all. A store
-// filed under the old definition would keep taking every turn it always took
-// and refuse the one new one, which is the worst of the outcomes on offer: not
-// a failed open, not a working store, but an exchange that stops being
-// writable the moment the model reasons.
-//
-// What it reads is the table's own definition, because that is the thing that
-// has to change and the only thing that says whether it already has. See
-// rebuild.sql for what the rebuild does and why it is a rebuild.
-func widen(db *sql.DB) error {
-	var definition string
-	err := db.QueryRow(
-		`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'contents'`).Scan(&definition)
-	if err != nil {
-		return fmt.Errorf("could not read the shape of the record: %w", err)
-	}
-
-	if strings.Contains(definition, "'"+kindThinking+"'") {
-		return nil
-	}
-
-	if _, err := db.Exec(rebuild); err != nil {
-		return fmt.Errorf("could not bring the record up to date: %w", err)
-	}
-
-	return nil
 }
 
 // dsn is the path with the settings the store needs to work: foreign keys
@@ -229,40 +184,25 @@ func write(ctx Context, tx *sql.Tx, thread int64, ordinal int, message Message) 
 // and leaving the rest null.
 func say(ctx Context, tx *sql.Tx, message int64, ordinal int, content Content) error {
 	const statement = `INSERT INTO contents
-		(message, ordinal, kind, text, signature, call, tool, arguments, content, failed)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		(message, ordinal, kind, text, call, tool, arguments, content, failed)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	if text, ok := content.Text(); ok {
 		_, err := tx.ExecContext(ctx, statement,
-			message, ordinal, kindText, text, nil, nil, nil, nil, nil, nil)
-		return err
-	}
-	if thought, ok := content.Thought(); ok {
-		// Neither half is read on the way in, as neither is on the way
-		// out. What is written down is what arrived, down to a
-		// reasoning that is the empty string: that is a whole thought
-		// and not half of one.
-		if data, redacted := thought.Data(); redacted {
-			_, err := tx.ExecContext(ctx, statement,
-				message, ordinal, kindRedacted, data, nil, nil, nil, nil, nil, nil)
-			return err
-		}
-		_, err := tx.ExecContext(ctx, statement,
-			message, ordinal, kindThinking, thought.Text(), thought.Signature(),
-			nil, nil, nil, nil, nil)
+			message, ordinal, kindText, text, nil, nil, nil, nil, nil)
 		return err
 	}
 	if request, ok := content.Use(); ok {
 		// The arguments are raw JSON and stay that way: the core does
 		// not parse them and neither does the record of it.
 		_, err := tx.ExecContext(ctx, statement,
-			message, ordinal, kindUse, nil, nil,
+			message, ordinal, kindUse, nil,
 			request.ID(), request.Name(), string(request.Arguments()), nil, nil)
 		return err
 	}
 	if result, ok := content.Result(); ok {
 		_, err := tx.ExecContext(ctx, statement,
-			message, ordinal, kindResult, nil, nil,
+			message, ordinal, kindResult, nil,
 			result.ID(), nil, nil, result.Content(), result.Failed())
 		return err
 	}
@@ -307,7 +247,7 @@ func (s *Store) Load(ctx Context, id string) (Exchange, error) {
 // walk below only has to notice when the turn changes.
 func read(ctx Context, db *sql.DB, thread int64) ([]Message, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT m.id, m.role, c.kind, c.text, c.signature, c.call, c.tool, c.arguments, c.content, c.failed
+		SELECT m.id, m.role, c.kind, c.text, c.call, c.tool, c.arguments, c.content, c.failed
 		  FROM messages m
 		  LEFT JOIN contents c ON c.message = m.id
 		 WHERE m.thread = ?
@@ -327,14 +267,13 @@ func read(ctx Context, db *sql.DB, thread int64) ([]Message, error) {
 			said      string
 			kind      sql.NullString
 			text      sql.NullString
-			signature sql.NullString
 			call      sql.NullString
 			tool      sql.NullString
 			arguments sql.NullString
 			answer    sql.NullString
 			failed    sql.NullBool
 		)
-		if err := rows.Scan(&message, &said, &kind, &text, &signature, &call, &tool, &arguments, &answer, &failed); err != nil {
+		if err := rows.Scan(&message, &said, &kind, &text, &call, &tool, &arguments, &answer, &failed); err != nil {
 			return nil, err
 		}
 
@@ -350,7 +289,7 @@ func read(ctx Context, db *sql.DB, thread int64) ([]Message, error) {
 			continue
 		}
 
-		piece, err := block(kind.String, text, signature, call, tool, arguments, answer, failed)
+		piece, err := block(kind.String, text, call, tool, arguments, answer, failed)
 		if err != nil {
 			return nil, err
 		}
@@ -369,17 +308,10 @@ func read(ctx Context, db *sql.DB, thread int64) ([]Message, error) {
 }
 
 // block turns one row back into the content it was written from.
-func block(kind string, text, signature, call, tool, arguments, answer sql.NullString, failed sql.NullBool) (Content, error) {
+func block(kind string, text, call, tool, arguments, answer sql.NullString, failed sql.NullBool) (Content, error) {
 	switch kind {
 	case kindText:
 		return messages.Text(text.String), nil
-	case kindThinking:
-		// A thought with nothing in either column is a whole thought
-		// rather than a broken one: an API asked to keep its reasoning
-		// to itself returns exactly that.
-		return messages.Thinking(thoughts.New(text.String, signature.String)), nil
-	case kindRedacted:
-		return messages.Thinking(thoughts.Redacted(text.String)), nil
 	case kindUse:
 		// A call with no arguments was written as an empty string and
 		// comes back as one: nil and empty are the same absence here,

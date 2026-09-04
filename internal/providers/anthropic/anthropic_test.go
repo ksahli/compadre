@@ -13,7 +13,6 @@ import (
 
 	"github.com/ksahli/compadre/internal/core/messages"
 	"github.com/ksahli/compadre/internal/core/roles"
-	"github.com/ksahli/compadre/internal/core/thoughts"
 	"github.com/ksahli/compadre/internal/core/threads"
 	"github.com/ksahli/compadre/internal/core/tools"
 	"github.com/ksahli/compadre/internal/core/tools/definitions"
@@ -51,9 +50,6 @@ type request struct {
 type contentBlock struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text"`
-	Thinking  string          `json:"thinking"`
-	Signature string          `json:"signature"`
-	Data      string          `json:"data"`
 	ID        string          `json:"id"`
 	Name      string          `json:"name"`
 	Input     json.RawMessage `json:"input"`
@@ -78,7 +74,8 @@ func text(content string) string {
 var toolUse = `{"type":"tool_use","id":"toolu_1","name":"read_file","input":{"path":"go.mod"}}`
 
 // thinking is the model reasoning before it answers, and redacted is the
-// same with the reasoning withheld. Both are carried rather than read.
+// same with the reasoning withheld. Both arrive and neither is carried: they
+// are this API's vocabulary and the port has no shape for them.
 var (
 	thinking = `{"type":"thinking","thinking":"hmm","signature":"sig"}`
 	silent   = `{"type":"thinking","thinking":"","signature":"sig"}`
@@ -160,12 +157,6 @@ func said(content messages.Content) string {
 	if text, ok := content.Text(); ok {
 		return "text:" + text
 	}
-	if thought, ok := content.Thought(); ok {
-		if data, redacted := thought.Data(); redacted {
-			return "redacted:" + data
-		}
-		return "thinking:" + thought.Text() + ":" + thought.Signature()
-	}
 	if use, ok := content.Use(); ok {
 		return "use:" + use.ID() + ":" + use.Name() + ":" + string(use.Arguments())
 	}
@@ -204,10 +195,6 @@ func block(b contentBlock) string {
 	switch b.Type {
 	case "text":
 		return "text:" + b.Text
-	case "thinking":
-		return "thinking:" + b.Thinking + ":" + b.Signature
-	case "redacted_thinking":
-		return "redacted:" + b.Data
 	case "tool_use":
 		return "use:" + b.ID + ":" + b.Name + ":" + string(b.Input)
 	case "tool_result":
@@ -337,44 +324,6 @@ func TestParameters(t *testing.T) {
 				),
 			),
 			turns: []turn{{"user", "result:toolu_1:ok:module compadre|result:toolu_2:failed:no such file"}},
-		},
-		{
-			// Reasoning goes back the way it came, ahead of the
-			// call it led to: it is the model's, the API asks for
-			// it back, and a call handed over without it is a
-			// thought the model has to have again.
-			name: "reasoning goes back with the call it led to",
-			thread: threads.New("",
-				messages.New(roles.Assistant,
-					messages.Thinking(thoughts.New("hmm", "sig")),
-					messages.Use(use.New("toolu_1", "read_file", use.Arguments(`{"path":"go.mod"}`))),
-				),
-			),
-			turns: []turn{{"assistant", `thinking:hmm:sig|use:toolu_1:read_file:{"path":"go.mod"}`}},
-		},
-		{
-			// The guard the text path has is exactly wrong here.
-			// An API keeping its reasoning to itself answers with
-			// a thought that is a signature and nothing else, and
-			// dropping that is the partial drop the API refuses.
-			name: "reasoning with nothing written in it still goes back",
-			thread: threads.New("",
-				messages.New(roles.Assistant,
-					messages.Thinking(thoughts.New("", "sig")),
-					messages.Text("hello"),
-				),
-			),
-			turns: []turn{{"assistant", "thinking::sig|text:hello"}},
-		},
-		{
-			name: "reasoning that was withheld goes back as the blob it is",
-			thread: threads.New("",
-				messages.New(roles.Assistant,
-					messages.Thinking(thoughts.Redacted("blob")),
-					messages.Text("hello"),
-				),
-			),
-			turns: []turn{{"assistant", "redacted:blob|text:hello"}},
 		},
 		{
 			// A result the tool had nothing to say for is still
@@ -714,22 +663,23 @@ func TestInvoke(t *testing.T) {
 			want:    []string{"text:a", "text:b"},
 		},
 		{
-			// Reasoning is kept, in place, whether it was written
-			// out or withheld: the API wants it back with the
-			// answer to the call it led to.
-			name:    "reasoning is kept in the order it arrived",
+			// Reasoning is dropped where it arrives, and what it
+			// stood in front of arrives unaffected. It is this
+			// API's own shape and the port has none for it, so it
+			// goes the way every other unshaped block goes.
+			name:    "reasoning is dropped and the rest arrives",
 			blocks:  []string{thinking, text("a"), toolUse},
 			replies: 1,
-			want:    []string{"thinking:hmm:sig", "text:a", `use:toolu_1:read_file:{"path":"go.mod"}`},
+			want:    []string{"text:a", `use:toolu_1:read_file:{"path":"go.mod"}`},
 		},
 		{
-			// The empty text guard stops at the text: a thought
-			// with a signature and nothing else is the whole of
-			// what an API keeping its reasoning to itself returns.
-			name:    "reasoning with nothing written in it is kept",
+			// Both shapes it comes in, and both dropped: a thought
+			// that is a signature and nothing else, and one whose
+			// reasoning was withheld.
+			name:    "reasoning written out and withheld are both dropped",
 			blocks:  []string{silent, redacted, text("a")},
 			replies: 1,
-			want:    []string{"thinking::sig", "redacted:blob", "text:a"},
+			want:    []string{"text:a"},
 		},
 		{
 			// An empty text block says nothing and cannot be sent
@@ -812,6 +762,14 @@ func TestInvokeRefusesANonReply(t *testing.T) {
 			// has no shape for is likewise no reply.
 			name:   "nothing but blocks with no shape",
 			body:   reply(unshaped),
+			reason: "nothing to read",
+		},
+		{
+			// Reasoning is a block with no shape like any other,
+			// so a response that is nothing else leaves nothing
+			// to read. The model reasoned and said nothing.
+			name:   "nothing but reasoning",
+			body:   reply(thinking, redacted),
 			reason: "nothing to read",
 		},
 		{

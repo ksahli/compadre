@@ -5,7 +5,6 @@ import (
 
 	"github.com/ksahli/compadre/internal/core/messages"
 	"github.com/ksahli/compadre/internal/core/roles"
-	"github.com/ksahli/compadre/internal/core/thoughts"
 	"github.com/ksahli/compadre/internal/core/tools/results"
 	"github.com/ksahli/compadre/internal/core/tools/use"
 )
@@ -15,12 +14,6 @@ import (
 type block struct {
 	text   string
 	isText bool
-
-	thinking   string
-	signature  string
-	data       string
-	redacted   bool
-	isThinking bool
 
 	id        string
 	name      string
@@ -104,41 +97,6 @@ func TestNew(t *testing.T) {
 			}},
 		},
 		{
-			// Reasoning is content like any other here, which is
-			// the whole point of carrying it: the core keeps it in
-			// the turn it belongs to and never reads it.
-			name: "the reasoning behind a call",
-			message: messages.New(roles.Assistant,
-				messages.Thinking(thoughts.New("hmm", "sig")),
-				messages.Use(use.New("call_1", "read_file", use.Arguments(`{"path":"go.mod"}`))),
-			),
-			role: roles.Assistant,
-			content: []block{
-				{thinking: "hmm", signature: "sig", isThinking: true},
-				{
-					id:        "call_1",
-					name:      "read_file",
-					arguments: `{"path":"go.mod"}`,
-					isUse:     true,
-				},
-			},
-		},
-		{
-			// A thought with nothing written in it is a whole
-			// thought: what an API told to keep its reasoning to
-			// itself hands back is a signature and no words.
-			name:    "reasoning with nothing written in it",
-			message: messages.New(roles.Assistant, messages.Thinking(thoughts.New("", "sig"))),
-			role:    roles.Assistant,
-			content: []block{{signature: "sig", isThinking: true}},
-		},
-		{
-			name:    "reasoning that was withheld",
-			message: messages.New(roles.Assistant, messages.Thinking(thoughts.Redacted("blob"))),
-			role:    roles.Assistant,
-			content: []block{{data: "blob", redacted: true, isThinking: true}},
-		},
-		{
 			// The shape the old two-string message could not hold:
 			// a sentence and the call it leads to, in that order.
 			name: "a sentence and the call it leads to",
@@ -220,26 +178,6 @@ func assert(t *testing.T, i int, got messages.Content, want block) {
 	}
 	if !isText && said != "" {
 		t.Errorf("Content()[%d].Text() = %q, want %q when not text", i, said, "")
-	}
-
-	thought, isThinking := got.Thought()
-	if isThinking != want.isThinking {
-		t.Errorf("Content()[%d].Thought() ok = %v, want %v", i, isThinking, want.isThinking)
-	}
-	if isThinking {
-		if thought.Text() != want.thinking {
-			t.Errorf("Content()[%d].Thought().Text() = %q, want %q", i, thought.Text(), want.thinking)
-		}
-		if thought.Signature() != want.signature {
-			t.Errorf("Content()[%d].Thought().Signature() = %q, want %q", i, thought.Signature(), want.signature)
-		}
-		data, redacted := thought.Data()
-		if redacted != want.redacted {
-			t.Errorf("Content()[%d].Thought().Data() redacted = %v, want %v", i, redacted, want.redacted)
-		}
-		if data != want.data {
-			t.Errorf("Content()[%d].Thought().Data() = %q, want %q", i, data, want.data)
-		}
 	}
 
 	request, isUse := got.Use()

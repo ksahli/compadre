@@ -11,7 +11,6 @@ import (
 	"github.com/ksahli/compadre/internal/core/inference"
 	"github.com/ksahli/compadre/internal/core/messages"
 	"github.com/ksahli/compadre/internal/core/roles"
-	"github.com/ksahli/compadre/internal/core/thoughts"
 	"github.com/ksahli/compadre/internal/core/threads"
 	"github.com/ksahli/compadre/internal/core/tools"
 	"github.com/ksahli/compadre/internal/core/tools/use"
@@ -65,9 +64,10 @@ var (
 )
 
 // blocks maps what a message says onto the content blocks the API expects,
-// in the order it said them. Arguments go out as they arrived, and so does
-// reasoning: both are the model's own, and re-encoding either would be this
-// adapter putting words in its mouth.
+// in the order it said them. Arguments go out as they arrived, because they
+// are the model's own and re-encoding them would be this adapter putting words
+// in its mouth. A turn read out of the record can hold no reasoning, since
+// [reply] keeps none, so there is nothing of the kind here to send back.
 func blocks(message messages.Type) []sdk.ContentBlockParamUnion {
 	blocks := []sdk.ContentBlockParamUnion{}
 	for _, content := range message.Content() {
@@ -80,20 +80,6 @@ func blocks(message messages.Type) []sdk.ContentBlockParamUnion {
 		// for a turn that said nothing.
 		if text, ok := content.Text(); ok && text != "" {
 			blocks = append(blocks, sdk.NewTextBlock(text))
-		}
-		// A thought goes back whole and unguarded, which is the one
-		// place the rule above does not hold: an API told to keep its
-		// reasoning to itself answers with a thought whose text is
-		// empty and whose signature is the whole of it, and that block
-		// is not nothing. It is also all or none — the API refuses a
-		// turn whose thinking has been rearranged, edited or partly
-		// dropped — so there is nothing here to be selective with.
-		if thought, ok := content.Thought(); ok {
-			if data, redacted := thought.Data(); redacted {
-				blocks = append(blocks, sdk.NewRedactedThinkingBlock(data))
-			} else {
-				blocks = append(blocks, sdk.NewThinkingBlock(thought.Signature(), thought.Text()))
-			}
 		}
 		if use, ok := content.Use(); ok {
 			blocks = append(blocks, sdk.NewToolUseBlock(use.ID(), use.Arguments(), use.Name()))
@@ -266,15 +252,12 @@ type provider struct {
 // that is no message at all — which [provider.Invoke] reports as an error,
 // since it is the one holding an error return.
 //
-// Reasoning is kept for a reason unlike the others. Nothing in this runtime
-// reads a thought, and nothing displays one. It is kept because this API asks
-// for it back: a request is sent without a thinking parameter, which on the
-// models this adapter reaches means the model reasons, and a tool result
-// handed back without the reasoning that asked for the tool is a turn the API
-// will quietly carry on without — the model picking the thread up mid-thought
-// with the thought gone. That failure says nothing and shows up as a run that
-// went worse than it should have, which is exactly the kind of silence this
-// package is written to avoid.
+// The model's own reasoning is among what is skipped. It arrives — no thinking
+// parameter is sent, which on the models this adapter reaches is what leaves
+// the model reasoning — and the core has no shape to put it in, so it is
+// dropped here like everything else the port does not carry. A response that
+// was nothing but reasoning therefore leaves no content at all, which is the
+// empty response above reached by another road.
 func reply(response *sdk.Message) []messages.Type {
 	content := []messages.Content{}
 	for _, block := range response.Content {
@@ -286,15 +269,6 @@ func reply(response *sdk.Message) []messages.Type {
 		// about turns written before this one existed.
 		if text, ok := block.AsAny().(sdk.TextBlock); ok && text.Text != "" {
 			content = append(content, messages.Text(text.Text))
-		}
-		// Both shapes reasoning comes in, and both go back unread.
-		// Keeping only the first would be the partial drop the API
-		// refuses outright.
-		if thought, ok := block.AsAny().(sdk.ThinkingBlock); ok {
-			content = append(content, messages.Thinking(thoughts.New(thought.Thinking, thought.Signature)))
-		}
-		if thought, ok := block.AsAny().(sdk.RedactedThinkingBlock); ok {
-			content = append(content, messages.Thinking(thoughts.Redacted(thought.Data)))
 		}
 		if tool, ok := block.AsAny().(sdk.ToolUseBlock); ok {
 			// Raw() is the argument JSON as sent, which is what
