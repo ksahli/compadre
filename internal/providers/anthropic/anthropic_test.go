@@ -3,6 +3,7 @@ package anthropic_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -125,13 +126,15 @@ func stub(t *testing.T, body string) (*request, *int, []anthropic.Option) {
 	return captured, calls, options(server.URL)
 }
 
-// failing stands in for an API that refuses the request.
-func failing(t *testing.T) []anthropic.Option {
+// failing stands in for an API that refuses the request, answering the given
+// status with an error body naming the given type. Retries are already off in
+// options, so each case is served once and asserted once.
+func failing(t *testing.T, status int, kind string) []anthropic.Option {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		io.WriteString(w, `{"type":"error","error":{"type":"internal_server_error","message":"boom"}}`)
+		w.WriteHeader(status)
+		io.WriteString(w, `{"type":"error","error":{"type":"`+kind+`","message":"boom"}}`)
 	}))
 	t.Cleanup(server.Close)
 	return options(server.URL)
@@ -648,12 +651,54 @@ func TestInvokeRefusesANonReply(t *testing.T) {
 }
 
 func TestInvokeReportsFailure(t *testing.T) {
-	options := failing(t)
+	cases := []struct {
+		name   string
+		status int
+		kind   string
+		want   error
+	}{
+		{"a request the API will not take", http.StatusBadRequest, "invalid_request_error", anthropic.ErrRequest},
+		{"credentials the API will not accept", http.StatusUnauthorized, "authentication_error", anthropic.ErrCredentials},
+		{"credentials not allowed to ask", http.StatusForbidden, "permission_error", anthropic.ErrPermission},
+		{"an account that cannot be billed", http.StatusForbidden, "billing_error", anthropic.ErrBilling},
+		{"a model the API does not know", http.StatusNotFound, "not_found_error", anthropic.ErrModel},
+		{"a request larger than the API takes", http.StatusRequestEntityTooLarge, "request_too_large", anthropic.ErrTooLarge},
+		{"requests turned away for now", http.StatusTooManyRequests, "rate_limit_error", anthropic.ErrRateLimited},
+		{"an API that could not answer", http.StatusInternalServerError, "api_error", anthropic.ErrUnavailable},
+		{"an API that is overloaded", 529, "overloaded_error", anthropic.ErrUnavailable},
+		{"a refusal this mapping has no shape for", http.StatusTeapot, "api_error", anthropic.ErrRefused},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			options := failing(t, c.status, c.kind)
+
+			thread := threads.New("", messages.New(roles.User, messages.Text("hello")))
+			replies, err := anthropic.New("", 0, options...).Invoke(context.Background(), thread, nil)
+			if !errors.Is(err, c.want) {
+				t.Errorf("Invoke() error = %v, want %v", err, c.want)
+			}
+			if len(replies) != 0 {
+				t.Errorf("replies = %q, want none", contents(replies))
+			}
+		})
+	}
+}
+
+// TestInvokeReportsWhatWasNotTheAPIs pins the pass-through: a request that
+// never got an answer is reported as what stopped it, not as something the API
+// did. A cancelled context is the one that matters — it is how an interrupt
+// ends an exchange.
+func TestInvokeReportsWhatWasNotTheAPIs(t *testing.T) {
+	_, _, options := stub(t, reply(text("hello")))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 
 	thread := threads.New("", messages.New(roles.User, messages.Text("hello")))
-	replies, err := anthropic.New("", 0, options...).Invoke(context.Background(), thread, nil)
-	if err == nil {
-		t.Fatal("Invoke() error = nil, want an error")
+	replies, err := anthropic.New("", 0, options...).Invoke(ctx, thread, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Invoke() error = %v, want %v", err, context.Canceled)
 	}
 	if len(replies) != 0 {
 		t.Errorf("replies = %q, want none", contents(replies))

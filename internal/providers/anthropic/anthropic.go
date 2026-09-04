@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 
@@ -34,6 +35,32 @@ type (
 const (
 	Model        = string(sdk.ModelClaudeSonnet5)
 	Tokens int64 = 1024
+)
+
+// The ways an exchange can end without an answer: what the API said when it
+// would not take the request, and what the model said when it stopped short of
+// a reply. They are one vocabulary because they are one thing to the caller —
+// a turn that did not happen — and they are exported so that a caller who
+// wants to tell one from another can, with [errors.Is], rather than by reading
+// this package's own words back.
+//
+// The API's account of itself — its status line, its error body, the request
+// id — is read here and not repeated. What the person at the terminal needs is
+// what became of their run, not what the wire said about it.
+var (
+	ErrCredentials = errors.New("the API would not accept the credentials")
+	ErrPermission  = errors.New("the credentials are not allowed to ask this")
+	ErrBilling     = errors.New("the account cannot be billed for the request")
+	ErrModel       = errors.New("the API does not know the model it was asked for")
+	ErrRequest     = errors.New("the API would not take the request as it was built")
+	ErrTooLarge    = errors.New("the request was larger than the API will take")
+	ErrRateLimited = errors.New("the API is turning requests away for now")
+	ErrUnavailable = errors.New("the API could not answer the request")
+	ErrRefused     = errors.New("the API refused the request")
+
+	ErrCutOff   = errors.New("the model's reply was cut off at the token ceiling")
+	ErrDeclined = errors.New("the model declined to answer")
+	ErrContext  = errors.New("the exchange no longer fits in the model's context window")
 )
 
 // blocks maps what a message says onto the content blocks the API expects,
@@ -193,14 +220,63 @@ func reply(response *sdk.Message) []messages.Type {
 func refused(response *sdk.Message) error {
 	switch response.StopReason {
 	case sdk.StopReasonMaxTokens:
-		return errors.New("the model's reply was cut off at the token ceiling")
+		return ErrCutOff
 	case sdk.StopReasonRefusal:
-		return errors.New("the model declined to answer")
+		return ErrDeclined
 	case sdk.StopReasonModelContextWindowExceeded:
-		return errors.New("the exchange no longer fits in the model's context window")
+		return ErrContext
 	default:
 		return nil
 	}
+}
+
+// failed reports what the API said when it would not answer, or hands back
+// what it was given where the failure was not the API's to report. It is the
+// request side of what [refused] does for the response: a status code is this
+// vendor's way of accounting for itself, the core has no vocabulary for one
+// and should not grow one, so it is read here and spent here.
+//
+// A 404 is reported as the model rather than as a thing not found: the address
+// this adapter posts to is fixed, so the only part of it a caller can get
+// wrong is which model they asked for. A 403 is two different things — a key
+// without access and an account that cannot be billed — and only the API's own
+// name for the error tells them apart. Every 5xx is one thing, including the
+// 529 this API answers when it is overloaded: it was not the request's fault
+// and it is worth trying again.
+//
+// Anything that is not the API refusing goes back untouched, so that a
+// cancelled request still reaches the caller as [context.Canceled] and an
+// interrupt ends the exchange rather than being reported as something the API
+// did.
+func failed(err error) error {
+	var refusal *sdk.Error
+	if !errors.As(err, &refusal) {
+		return err
+	}
+
+	switch refusal.StatusCode {
+	case http.StatusBadRequest:
+		return ErrRequest
+	case http.StatusUnauthorized:
+		return ErrCredentials
+	case http.StatusForbidden:
+		if refusal.Type() == sdk.ErrorTypeBillingError {
+			return ErrBilling
+		}
+		return ErrPermission
+	case http.StatusNotFound:
+		return ErrModel
+	case http.StatusRequestEntityTooLarge:
+		return ErrTooLarge
+	case http.StatusTooManyRequests:
+		return ErrRateLimited
+	}
+
+	if refusal.StatusCode >= 500 {
+		return ErrUnavailable
+	}
+
+	return ErrRefused
 }
 
 // Invoke implements [inference.Provider]. One round trip: the thread and the
@@ -214,7 +290,7 @@ func refused(response *sdk.Message) error {
 func (p *provider) Invoke(ctx Context, thread threads.Type, registry tools.Registry) ([]messages.Type, error) {
 	response, err := p.client.Messages.New(ctx, p.parameters(thread, registry))
 	if err != nil {
-		return nil, err
+		return nil, failed(err)
 	}
 	if err := refused(response); err != nil {
 		return nil, err

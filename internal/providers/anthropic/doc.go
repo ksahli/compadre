@@ -8,8 +8,16 @@
 // each of the response's content blocks becomes an assistant message: text
 // as itself, a tool call as the argument JSON the model sent, which holds
 // the call until the port carries tool use as something other than text.
-// Everything the port has no shape for — usage, stop reason — is dropped on
-// the way through.
+// Everything the port has no shape for — usage among it — is dropped on the
+// way through.
+//
+// What is not dropped is a turn that never became an answer. A status code
+// that says the API would not take the request, and a stop reason that says
+// the model stopped short of finishing one, are both this vendor accounting
+// for itself in words the core does not have and should not learn. They are
+// read here and reported as one of this package's own errors, so that what
+// reaches the person at the terminal is what became of their run rather than
+// a dump of the exchange that failed.
 //
 // The model and the token ceiling are the adapter's, not the thread's: they
 // arrive at [New] from the wiring, which is what lets the command line choose

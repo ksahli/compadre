@@ -220,6 +220,13 @@ of finishing — cut off at the token ceiling, declined, or out of context — i
 error rather than a half answer passed off as a whole one, and an interrupt
 cancels the exchange rather than killing the process mid-request.
 
+A request the API turns away is reported the same way: a key it will not
+accept, a model it does not know, an account it cannot bill, a rate limit, or
+an API that could not answer at all, each said in a sentence about the run
+rather than printed as the HTTP exchange that failed. What stopped the run and
+was not the API's doing — a cancelled request among it — still comes back as
+itself.
+
 ## Development
 
 ```sh
