@@ -30,6 +30,16 @@
 // absent one are the same thing to the flag set, so both mean a session; a run
 // with nothing to say is a run that will be asked, not an error.
 //
+// An interrupt means different things to the two of them, which is why this
+// package listens for it rather than the process it is a command of. With
+// -message it ends the run, since the turn it landed in was the whole of it.
+// In a session it ends the turn and nothing else: what the model had said is
+// already printed, the record already has everything that got that far, and
+// the prompt comes back with the same exchange to carry on. Ctrl-C at a prompt
+// with nothing in flight is a gesture at nothing, so the first is answered with
+// a way out rather than acted on and a second one takes it — the session ends,
+// the same as the end of input.
+//
 // Opening the exchange has two shapes of its own, and they cross with the
 // first two rather than doubling them. Without -exchange it is a new one,
 // opened with the instructions given here. With one it is the exchange filed
@@ -55,6 +65,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 
@@ -177,11 +188,20 @@ func (c *Command) Execute(ctx Context) error {
 	// turn that is only spaces is no turn at all and means a session, the
 	// same as an absent flag; one that has something in it is the caller's
 	// own words and is not this command's to tidy.
+	// One interrupt is held at a time, which is all any of the waiters can
+	// act on: the buffer is what keeps a signal that arrives between two of
+	// them from being dropped, not a queue of gestures to work through.
+	interrupts := make(chan os.Signal, 1)
+	signal.Notify(interrupts, os.Interrupt)
+	defer signal.Stop(interrupts)
+
 	finished := opening
 	if strings.TrimSpace(c.input) != "" {
-		finished, err = c.converse(ctx, agent, opening.With(opening.Thread().Append(ask(c.input))))
+		turn, stop := interruptible(ctx, interrupts)
+		finished, err = c.converse(turn, agent, opening.With(opening.Thread().Append(ask(c.input))))
+		stop()
 	} else {
-		finished, err = c.session(ctx, agent, opening)
+		finished, err = c.session(ctx, agent, opening, interrupts)
 	}
 
 	if id := finished.ID(); id != "" {
@@ -200,27 +220,52 @@ func (c *Command) Execute(ctx Context) error {
 // mistake -message was refused for, and at a prompt the kindest answer is to
 // ask again rather than to spend a request finding out.
 //
+// An interrupt is not the end of one. It ends the turn it landed in and the
+// prompt comes back, which is the whole point of reading the turns here rather
+// than one per process: a session that was three questions deep is still three
+// questions deep after a reply somebody did not want to wait for. What the turn
+// got as far as saying is already printed and already written down, so the
+// exchange carried on with is the one that came back from it.
+//
+// At a prompt there is nothing in flight for an interrupt to end, so the first
+// is answered with the way out rather than acted on and a second one takes it.
+// Anything typed in between disarms that, a blank line included: a caller who
+// went back to talking is not a caller halfway through quitting.
+//
 // The end comes four ways and they are not the same. Stdin running out is the
-// end of a session that said everything it had to say, and so is a cancelled
-// context — a caller who interrupts at the prompt wants out, and there is
-// nothing in flight for the signal to spoil. A turn that failed is the third,
-// and it comes back as an error: the record has everything up to it and the id
-// is about to be printed, so the session is picked up with -exchange rather
-// than carried on over a provider or a store that has stopped working. Stdin
-// itself failing is the fourth and comes back as an error too, for the reason
-// the two must not be confused: a reader that broke halfway through a line has
-// swallowed a turn somebody typed, and reporting that as a session that ended
-// would be reporting a lost turn as a job well done.
-func (c *Command) session(ctx Context, agent Agent, exchange Exchange) (Exchange, error) {
+// end of a session that said everything it had to say, and so is a second
+// interrupt at the prompt and a cancelled context — the last is the process
+// being told to go down, which is not a thing a session can decline. A turn
+// that failed is the third, and it comes back as an error: the record has
+// everything up to it and the id is about to be printed, so the session is
+// picked up with -exchange rather than carried on over a provider or a store
+// that has stopped working. Stdin itself failing is the fourth and comes back
+// as an error too, for the reason the two must not be confused: a reader that
+// broke halfway through a line has swallowed a turn somebody typed, and
+// reporting that as a session that ended would be reporting a lost turn as a
+// job well done.
+func (c *Command) session(ctx Context, agent Agent, exchange Exchange, interrupts <-chan os.Signal) (Exchange, error) {
 	lines := listen(c.in)
+	armed := false
 
 	for {
 		fmt.Fprint(c.errs, prompt)
 
-		next, ok := read(ctx, lines)
-		if !ok {
+		next, what := read(ctx, lines, interrupts)
+		switch what {
+		case heardEnd:
 			return exchange, nil
+		case heardInterrupt:
+			if armed {
+				fmt.Fprintln(c.errs)
+				return exchange, nil
+			}
+			armed = true
+			fmt.Fprintln(c.errs, "\ninterrupted, ^C again to end the session")
+			continue
 		}
+
+		armed = false
 		if next.err != nil {
 			return exchange, next.err
 		}
@@ -230,11 +275,25 @@ func (c *Command) session(ctx Context, agent Agent, exchange Exchange) (Exchange
 			continue
 		}
 
-		finished, err := c.converse(ctx, agent, exchange.With(exchange.Thread().Append(ask(said))))
+		// Whether the turn was interrupted is what stop says rather
+		// than something read off the error. The error is whatever the
+		// provider made of a cancelled request and is free to be
+		// anything; the interrupt is this program's own doing and is
+		// reported by the thing that did it. It also keeps the process
+		// being told to go down out of it — that cancels the turn too,
+		// and it is not a turn somebody changed their mind about.
+		turn, stop := interruptible(ctx, interrupts)
+		finished, err := c.converse(turn, agent, exchange.With(exchange.Thread().Append(ask(said))))
+		aborted := stop()
+
+		exchange = finished
 		if err != nil {
+			if aborted {
+				fmt.Fprintln(c.errs, "interrupted")
+				continue
+			}
 			return finished, err
 		}
-		exchange = finished
 	}
 }
 
@@ -312,6 +371,45 @@ type turn struct {
 	err  error
 }
 
+// interruptible is the context one turn runs under: ctx, cancelled by the next
+// interrupt, and the stop that releases the watching goroutine once the turn is
+// over. It is what makes an interrupt the end of a turn rather than the end of
+// everything — a context is cancelled once and for all, so a session that ran
+// its turns under one would have no more turns after the first Ctrl-C.
+//
+// The stop says whether it was the interrupt that ended the turn, because it is
+// the only thing that knows. The context cannot be asked afterwards: stopping
+// cancels it too, so by the time the caller is holding an answer every turn
+// looks cancelled. Nor can the error, which is whatever the provider made of a
+// request that went away.
+//
+// The stop waits for the watcher to be gone before it returns, which is what
+// keeps an interrupt from falling between two waits. A watcher still on its way
+// out is still a candidate to receive one, and a signal received by nobody who
+// will act on it is a keystroke that did nothing; waiting means that once the
+// turn is over the only thing listening is the prompt.
+func interruptible(ctx Context, interrupts <-chan os.Signal) (Context, func() bool) {
+	running, cancel := context.WithCancel(ctx)
+
+	aborted, watched := false, make(chan struct{})
+	go func() {
+		defer close(watched)
+
+		select {
+		case <-interrupts:
+			aborted = true
+			cancel()
+		case <-running.Done():
+		}
+	}()
+
+	return running, func() bool {
+		cancel()
+		<-watched
+		return aborted
+	}
+}
+
 // listen reads lines off a reader into a channel, closed when there are no
 // more. It exists so that waiting for a turn is something a select can be
 // written over: a read from stdin cannot be cancelled, and a session that
@@ -348,18 +446,45 @@ func listen(in io.Reader) <-chan turn {
 	return turns
 }
 
-// read is the next turn, or the end of the session. The second return says
-// which: false is stdin running out or the context being cancelled, and the
-// caller treats those alike because they are alike — both are a session that
-// is over, neither is a session that went wrong. A session that did go wrong
-// arrives as a turn carrying an error rather than as a false, which is the
-// distinction the channel is a struct for.
-func read(ctx Context, turns <-chan turn) (turn, bool) {
+// heard is what came of waiting at the prompt. There are three of them and the
+// session answers each differently, which is why this is a word rather than the
+// bool it was when there were two.
+type heard int
+
+const (
+	// heardTurn is a line off the reader, which may be a line that says
+	// the reader failed: a session that went wrong arrives as a turn
+	// carrying an error, which is the distinction the channel is a struct
+	// for.
+	heardTurn heard = iota
+
+	// heardInterrupt is Ctrl-C at the prompt, with nothing in flight for
+	// it to end.
+	heardInterrupt
+
+	// heardEnd is stdin running out or the context being cancelled. The
+	// caller treats those alike because they are alike — both are a
+	// session that is over, neither is a session that went wrong.
+	heardEnd
+)
+
+// read is the next turn, or the reason there was not one.
+//
+// Waiting on the interrupts here is also what keeps one typed at the prompt
+// from being answered later: a signal nobody took would sit in the buffer and
+// cancel the next turn the moment it began, which is an interrupt landing on
+// something the caller never asked to interrupt.
+func read(ctx Context, turns <-chan turn, interrupts <-chan os.Signal) (turn, heard) {
 	select {
 	case next, ok := <-turns:
-		return next, ok
+		if !ok {
+			return turn{}, heardEnd
+		}
+		return next, heardTurn
+	case <-interrupts:
+		return turn{}, heardInterrupt
 	case <-ctx.Done():
-		return turn{}, false
+		return turn{}, heardEnd
 	}
 }
 

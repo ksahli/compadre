@@ -24,10 +24,17 @@ func run(arguments []string, stderr io.Writer) int {
 		return 1
 	}
 
-	// An interrupt cancels the exchange rather than killing the process
-	// mid-request: the context is already threaded through every call the
-	// command makes, so there is somewhere for the signal to land.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// A termination cancels the whole run: the context is threaded through
+	// every call the command makes, so there is somewhere for the signal to
+	// land rather than the process dying mid-request.
+	//
+	// An interrupt is deliberately not here. What Ctrl-C means depends on
+	// what is driving the turns — the end of the run when there is one
+	// message, the end of the turn when there is a session at a prompt —
+	// and that is the command's to know. It is also why this context could
+	// not answer it if it wanted to: cancelling is once and for all, and a
+	// session has to survive being interrupted.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 	defer stop()
 
 	if err := command.Execute(ctx); err != nil {

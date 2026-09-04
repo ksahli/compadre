@@ -37,6 +37,10 @@ Early. What works today:
 - a session: `invoke` with no `-message` reads turns from stdin a line at a
   time and answers each in the exchange the last one grew — one process, one
   id, no copying an id between runs
+- an interrupt in a session ends the turn and not the session: Ctrl-C while
+  the model is being waited on abandons that reply and asks again, with
+  everything said so far still in the exchange. The way out is the end of the
+  input, or two Ctrl-Cs in a row at the prompt
 - what the run is bounded by, on the command line: `-model` and `-max-tokens`
   for the model to reach and how much of a reply it may write, `-workspace` for
   the directory the file tools may see, and `-max-turns` for how many turns one
@@ -199,12 +203,16 @@ which it is:
 echo 'why is the sky blue?' | go run . invoke > answer.txt
 ```
 
-There are three ways out. Ctrl-D ends a session that has said everything it had
-to say. So does Ctrl-C at the prompt: nothing is in flight for the interrupt to
-spoil. A turn that failed is the third, and it is not quiet — what was said is
-printed, the failure is reported, and the id still goes to stderr, so the
-session is picked back up with `-exchange` rather than lost. Ctrl-C part way
-through an answer cancels that request and ends the session that way.
+Ctrl-D ends a session that has said everything it had to say. A turn that
+failed ends one too, and not quietly — what was said is printed, the failure is
+reported, and the id still goes to stderr, so the session is picked back up
+with `-exchange` rather than lost.
+
+Ctrl-C is neither. Part way through an answer it abandons that turn and asks
+again: whatever the model got as far as saying is printed and written down, and
+the next question carries on in the same exchange. At the prompt there is
+nothing in flight for it to spoil, so the first says how to leave and a second
+one in a row takes it — anything typed in between puts that away again.
 
 `compadre help` lists the commands, and `compadre invoke -h` the arguments
 `invoke` takes.
@@ -218,7 +226,8 @@ default, so a model that keeps asking for tools is stopped rather than left to
 spend. A reply the model stopped short
 of finishing — cut off at the token ceiling, declined, or out of context — is an
 error rather than a half answer passed off as a whole one, and an interrupt
-cancels the exchange rather than killing the process mid-request.
+cancels the request rather than killing the process mid-flight — the run itself
+when `-message` was the whole of it, the turn alone in a session.
 
 A request the API turns away is reported the same way: a key it will not
 accept, a model it does not know, an account it cannot bill, a rate limit, or

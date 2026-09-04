@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -681,7 +682,7 @@ func TestSession(t *testing.T) {
 	store := &recorder{id: "7"}
 	agent := agents.New(provider, definitions.New(), store, agents.Turns)
 
-	finished, err := command.session(context.Background(), agent, exchanges.Open(threads.New("be brief")))
+	finished, err := command.session(context.Background(), agent, exchanges.Open(threads.New("be brief")), nil)
 	if err != nil {
 		t.Fatalf("session() error = %v, want nil", err)
 	}
@@ -731,7 +732,7 @@ func TestSessionKeepsTheStreamsApart(t *testing.T) {
 	command, out, errs := session("why is the sky blue?\n")
 	agent := agents.New(answers("rayleigh scattering"), definitions.New(), &recorder{id: "7"}, agents.Turns)
 
-	if _, err := command.session(context.Background(), agent, exchanges.Open(threads.New(""))); err != nil {
+	if _, err := command.session(context.Background(), agent, exchanges.Open(threads.New("")), nil); err != nil {
 		t.Fatalf("session() error = %v, want nil", err)
 	}
 
@@ -754,7 +755,7 @@ func TestSessionDoesNotSendABlankLine(t *testing.T) {
 	provider := answers("rayleigh scattering")
 	agent := agents.New(provider, definitions.New(), &recorder{id: "7"}, agents.Turns)
 
-	finished, err := command.session(context.Background(), agent, exchanges.Open(threads.New("")))
+	finished, err := command.session(context.Background(), agent, exchanges.Open(threads.New("")), nil)
 	if err != nil {
 		t.Fatalf("session() error = %v, want nil", err)
 	}
@@ -785,7 +786,7 @@ func TestSessionEndsWhenThereIsNothingLeftToRead(t *testing.T) {
 	agent := agents.New(provider, definitions.New(), &recorder{id: "7"}, agents.Turns)
 	opening := exchanges.Open(threads.New("be brief"))
 
-	finished, err := command.session(context.Background(), agent, opening)
+	finished, err := command.session(context.Background(), agent, opening, nil)
 	if err != nil {
 		t.Fatalf("session() error = %v, want nil", err)
 	}
@@ -810,7 +811,7 @@ func TestSessionEndsOnACancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	finished, err := command.session(ctx, agent, exchanges.Open(threads.New("")))
+	finished, err := command.session(ctx, agent, exchanges.Open(threads.New("")), nil)
 	if err != nil {
 		t.Fatalf("session() error = %v, want nil", err)
 	}
@@ -838,7 +839,7 @@ func TestSessionEndsOnATurnThatFailed(t *testing.T) {
 	failing := &turning{model: answers("rayleigh scattering"), err: errors.New("the model is out")}
 	agent := agents.New(failing, definitions.New(), &recorder{id: "7"}, agents.Turns)
 
-	finished, err := command.session(context.Background(), agent, exchanges.Open(threads.New("")))
+	finished, err := command.session(context.Background(), agent, exchanges.Open(threads.New("")), nil)
 	if err == nil {
 		t.Fatal("session() error = nil, want an error")
 	}
@@ -869,7 +870,7 @@ func TestSessionEndsOnAReaderThatBroke(t *testing.T) {
 	provider := answers("rayleigh scattering", "never asked")
 	agent := agents.New(provider, definitions.New(), &recorder{id: "7"}, agents.Turns)
 
-	finished, err := command.session(context.Background(), agent, exchanges.Open(threads.New("")))
+	finished, err := command.session(context.Background(), agent, exchanges.Open(threads.New("")), nil)
 	if err == nil {
 		t.Fatal("session() error = nil, want an error")
 	}
@@ -898,7 +899,7 @@ func TestSessionReadsATurnUpToTheCeiling(t *testing.T) {
 	provider := answers("that is a lot of x")
 	agent := agents.New(provider, definitions.New(), &recorder{id: "7"}, agents.Turns)
 
-	if _, err := command.session(context.Background(), agent, exchanges.Open(threads.New(""))); err != nil {
+	if _, err := command.session(context.Background(), agent, exchanges.Open(threads.New("")), nil); err != nil {
 		t.Fatalf("session() error = %v, want nil", err)
 	}
 	if got, want := len(provider.threads), 1; got != want {
@@ -906,6 +907,146 @@ func TestSessionReadsATurnUpToTheCeiling(t *testing.T) {
 	}
 	if got := said(provider.threads[0]); len(got) != 1 || got[0] != "User: "+long {
 		t.Errorf("the turn handed over was not the long line intact")
+	}
+}
+
+// TestSessionInterruptedMidTurnAsksAgain is the point of the whole thing. An
+// interrupt while the model is being waited on ends that turn and nothing more:
+// the prompt comes back, the next line is answered in the same exchange, and
+// the thread the model is handed the second time is the proof — it still
+// carries the question the interrupt cut short.
+func TestSessionInterruptedMidTurnAsksAgain(t *testing.T) {
+	command, out, errs := session("why is the sky blue?\nand at sunset?\n")
+	entered := make(chan struct{})
+	provider := &waiting{entered: entered, model: answers("the light travels further")}
+	agent := agents.New(provider, definitions.New(), &recorder{id: "7"}, agents.Turns)
+
+	// The interrupt is sent once the provider says it has the turn, so the
+	// case interrupts a request rather than racing one.
+	interrupts := make(chan os.Signal, 1)
+	go func() {
+		<-entered
+		interrupts <- os.Interrupt
+	}()
+
+	finished, err := command.session(context.Background(), agent, exchanges.Open(threads.New("be brief")), interrupts)
+	if err != nil {
+		t.Fatalf("session() error = %v, want nil", err)
+	}
+
+	if got, want := len(provider.model.threads), 2; got != want {
+		t.Fatalf("the model was asked %d times, want %d", got, want)
+	}
+	second := []string{
+		"User: why is the sky blue?",
+		"User: and at sunset?",
+	}
+	if got := said(provider.model.threads[1]); !slices.Equal(got, second) {
+		t.Errorf("the second turn was handed %v, want %v", got, second)
+	}
+
+	// Only the turn that finished said anything, and the id is the one the
+	// interrupted turn was already filed under.
+	if got, want := out.String(), "the light travels further\n"; got != want {
+		t.Errorf("session() printed %q, want %q", got, want)
+	}
+	if got, want := errs.String(), "interrupted"; !strings.Contains(got, want) {
+		t.Errorf("session() reported %q, want it to mention %q", got, want)
+	}
+	if got, want := finished.ID(), "7"; got != want {
+		t.Errorf("session().ID() = %q, want %q", got, want)
+	}
+}
+
+// TestSessionEndsOnASecondInterruptAtThePrompt pins the deliberate way out for
+// fingers that expect one. There is nothing in flight for an interrupt at the
+// prompt to end, so the first is answered with the way out rather than acted
+// on, and the second takes it — quietly, like the end of input, since a caller
+// who asked to leave has not been failed.
+func TestSessionEndsOnASecondInterruptAtThePrompt(t *testing.T) {
+	out, errs := &bytes.Buffer{}, &bytes.Buffer{}
+	// Nothing is ever written to it: a prompt nobody has typed at.
+	untyped, _ := io.Pipe()
+	command := &Command{in: untyped, out: out, errs: errs}
+	provider := answers()
+	agent := agents.New(provider, definitions.New(), &recorder{id: "7"}, agents.Turns)
+
+	interrupts := make(chan os.Signal, 2)
+	interrupts <- os.Interrupt
+	interrupts <- os.Interrupt
+
+	opening := exchanges.Open(threads.New("be brief"))
+	finished, err := command.session(context.Background(), agent, opening, interrupts)
+	if err != nil {
+		t.Fatalf("session() error = %v, want nil", err)
+	}
+
+	if got := len(provider.threads); got != 0 {
+		t.Errorf("the model was asked %d times, want none", got)
+	}
+	if got := out.String(); got != "" {
+		t.Errorf("session() printed %q, want nothing", got)
+	}
+	// The first interrupt said how to leave, and the exchange comes back
+	// untouched: nothing was said in it, so nothing filed it.
+	if got, want := errs.String(), "^C again"; !strings.Contains(got, want) {
+		t.Errorf("session() reported %q, want it to mention %q", got, want)
+	}
+	if got := finished.ID(); got != "" {
+		t.Errorf("session().ID() = %q, want none", got)
+	}
+}
+
+// TestSessionDisarmsOnAnythingTyped pins the other half of that gesture. Two
+// interrupts end a session only if they are two in a row; a caller who went
+// back to talking in between is not a caller halfway through quitting.
+//
+// The case is choreographed on the prompt itself. Every step waits for the
+// session to say it is at the prompt again before the next thing is done to
+// it, which is what makes an interrupt land where the case says it lands
+// rather than wherever the scheduler put it.
+func TestSessionDisarmsOnAnythingTyped(t *testing.T) {
+	first, second := make(chan struct{}), make(chan struct{})
+	out, errs := &bytes.Buffer{}, &announcing{written: &bytes.Buffer{}, prompts: make(chan struct{}, 8)}
+	command := &Command{
+		in: io.MultiReader(
+			held{release: first, reader: strings.NewReader("why is the sky blue?\n")},
+			held{release: second, reader: strings.NewReader("and at sunset?\n")},
+		),
+		out:  out,
+		errs: errs,
+	}
+	provider := answers("rayleigh scattering", "the light travels further")
+	agent := agents.New(provider, definitions.New(), &recorder{id: "7"}, agents.Turns)
+
+	interrupts := make(chan os.Signal)
+	go func() {
+		<-errs.prompts // the first prompt: interrupt it, which arms
+		interrupts <- os.Interrupt
+		<-errs.prompts // and it asked again rather than ending
+		close(first)   // a turn, which is what disarms
+
+		<-errs.prompts // the prompt after that turn
+		interrupts <- os.Interrupt
+		<-errs.prompts // still asking: the turn undid the first interrupt
+		close(second)
+	}()
+
+	finished, err := command.session(context.Background(), agent, exchanges.Open(threads.New("")), interrupts)
+	if err != nil {
+		t.Fatalf("session() error = %v, want nil", err)
+	}
+
+	// Both turns were answered, which two interrupts in a row would have
+	// left the second of unasked.
+	if got, want := len(provider.threads), 2; got != want {
+		t.Fatalf("the model was asked %d times, want %d", got, want)
+	}
+	if got, want := out.String(), "rayleigh scattering\nthe light travels further\n"; got != want {
+		t.Errorf("session() printed %q, want %q", got, want)
+	}
+	if got, want := finished.ID(), "7"; got != want {
+		t.Errorf("session().ID() = %q, want %q", got, want)
 	}
 }
 
@@ -924,4 +1065,61 @@ func (t *turning) Invoke(ctx Context, thread threads.Type, registry tools.Regist
 		return nil, t.err
 	}
 	return t.model.Invoke(ctx, thread, registry)
+}
+
+// waiting is a provider whose first call hangs until the context it was given
+// is cancelled, which is what a request somebody is still waiting on looks like
+// from in here. It says when it has been entered, so that a case can interrupt
+// a turn rather than race one, and every call after that is the model behind
+// it. The thread is kept either way: what the interrupted turn was asked is
+// half of what a case has to say about the turn after it.
+type waiting struct {
+	entered chan struct{}
+	model   *model
+}
+
+func (w *waiting) Invoke(ctx Context, thread threads.Type, registry tools.Registry) ([]messages.Type, error) {
+	if w.entered == nil {
+		return w.model.Invoke(ctx, thread, registry)
+	}
+
+	w.model.threads = append(w.model.threads, thread)
+	close(w.entered)
+	w.entered = nil
+
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// held is a reader nothing can be read from until it is released. It is how a
+// case says what happened first: the line is not there to be read until the
+// interrupt ahead of it has been taken.
+type held struct {
+	release <-chan struct{}
+	reader  io.Reader
+}
+
+func (h held) Read(p []byte) (int, error) {
+	<-h.release
+	return h.reader.Read(p)
+}
+
+// announcing is a stream that says when the session wrote a prompt to it, so
+// that a case can act between one turn and the next rather than guess at when
+// the session got there. What was written is kept as well, since a case that
+// waits on the prompts usually has something to say about the rest of it too.
+type announcing struct {
+	written *bytes.Buffer
+	prompts chan struct{}
+}
+
+func (a *announcing) Write(p []byte) (int, error) {
+	if string(p) == prompt {
+		a.prompts <- struct{}{}
+	}
+	return a.written.Write(p)
+}
+
+func (a *announcing) String() string {
+	return a.written.String()
 }
