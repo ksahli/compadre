@@ -79,9 +79,19 @@ type (
 	Store    = memory.Store
 )
 
-// prompt is what a session writes before waiting for a turn. It goes to
-// stderr, like everything else this program says about itself.
-const prompt = "> "
+const (
+	// prompt is what a session writes before waiting for a turn. It goes
+	// to stderr, like everything else this program says about itself.
+	prompt = "> "
+
+	// maxTurn is the ceiling on one line read from stdin, and scanning the
+	// buffer that reading starts with. bufio's own default ceiling is
+	// 64KiB, which is a plausible size for a turn somebody pasted rather
+	// than typed; a line over this one is still the end of the session,
+	// but it is the end that says so.
+	maxTurn  = 1 << 20
+	scanning = 64 << 10
+)
 
 // Command is a parsed invoke: the instructions to stand over the exchange, the
 // message to carry it on if there is one, the exchange to continue if there is
@@ -190,30 +200,37 @@ func (c *Command) Execute(ctx Context) error {
 // mistake -message was refused for, and at a prompt the kindest answer is to
 // ask again rather than to spend a request finding out.
 //
-// The end comes three ways and they are not the same. Stdin running out is the
+// The end comes four ways and they are not the same. Stdin running out is the
 // end of a session that said everything it had to say, and so is a cancelled
 // context — a caller who interrupts at the prompt wants out, and there is
 // nothing in flight for the signal to spoil. A turn that failed is the third,
 // and it comes back as an error: the record has everything up to it and the id
 // is about to be printed, so the session is picked up with -exchange rather
-// than carried on over a provider or a store that has stopped working.
+// than carried on over a provider or a store that has stopped working. Stdin
+// itself failing is the fourth and comes back as an error too, for the reason
+// the two must not be confused: a reader that broke halfway through a line has
+// swallowed a turn somebody typed, and reporting that as a session that ended
+// would be reporting a lost turn as a job well done.
 func (c *Command) session(ctx Context, agent Agent, exchange Exchange) (Exchange, error) {
 	lines := listen(c.in)
 
 	for {
 		fmt.Fprint(c.errs, prompt)
 
-		line, ok := read(ctx, lines)
+		next, ok := read(ctx, lines)
 		if !ok {
 			return exchange, nil
 		}
+		if next.err != nil {
+			return exchange, next.err
+		}
 
-		turn := strings.TrimSpace(line)
-		if turn == "" {
+		said := strings.TrimSpace(next.line)
+		if said == "" {
 			continue
 		}
 
-		finished, err := c.converse(ctx, agent, exchange.With(exchange.Thread().Append(ask(turn))))
+		finished, err := c.converse(ctx, agent, exchange.With(exchange.Thread().Append(ask(said))))
 		if err != nil {
 			return finished, err
 		}
@@ -287,41 +304,62 @@ func ask(turn string) messages.Type {
 	return messages.New(roles.User, messages.Text(turn))
 }
 
+// turn is one line off the reader, or the reason there will not be another.
+// The two travel together because the session has to tell them apart, and a
+// closed channel says only that nothing more is coming rather than why.
+type turn struct {
+	line string
+	err  error
+}
+
 // listen reads lines off a reader into a channel, closed when there are no
 // more. It exists so that waiting for a turn is something a select can be
 // written over: a read from stdin cannot be cancelled, and a session that
 // could only notice an interrupt after the next line was typed would be a
 // session with no way out of it.
 //
+// A reader that failed sends that before it closes. Scanning is the one thing
+// here that can end a session without the session having ended — a line past
+// the ceiling stops the scan with an error, and a channel that only ever
+// closes would hand that to the caller as stdin having run out.
+//
 // The goroutine is left behind when a session ends on a cancelled context,
-// still blocked on a read that will never be looked at. That is deliberate and
-// it is bounded: there is one per command, the command is the process, and a
-// process on its way out has nothing left for that read to interfere with.
-func listen(in io.Reader) <-chan string {
-	lines := make(chan string)
+// still blocked on a read or a send that will never be looked at. That is
+// deliberate and it is bounded: there is one per command, the command is the
+// process, and a process on its way out has nothing left for that read to
+// interfere with.
+func listen(in io.Reader) <-chan turn {
+	turns := make(chan turn)
 
 	go func() {
-		defer close(lines)
+		defer close(turns)
 
 		scanner := bufio.NewScanner(in)
+		scanner.Buffer(make([]byte, 0, scanning), maxTurn)
+
 		for scanner.Scan() {
-			lines <- scanner.Text()
+			turns <- turn{line: scanner.Text()}
+		}
+		if err := scanner.Err(); err != nil {
+			turns <- turn{err: fmt.Errorf("could not read the turn: %w", err)}
 		}
 	}()
 
-	return lines
+	return turns
 }
 
 // read is the next turn, or the end of the session. The second return says
 // which: false is stdin running out or the context being cancelled, and the
 // caller treats those alike because they are alike — both are a session that
-// is over, neither is a session that went wrong.
-func read(ctx Context, lines <-chan string) (string, bool) {
+// is over, neither is a session that went wrong. A session that did go wrong
+// arrives as a turn carrying an error rather than as a false, which is the
+// distinction the channel is a struct for.
+func read(ctx Context, turns <-chan turn) (turn, bool) {
 	select {
-	case line, ok := <-lines:
-		return line, ok
+	case next, ok := <-turns:
+		return next, ok
 	case <-ctx.Done():
-		return "", false
+		return turn{}, false
 	}
 }
 

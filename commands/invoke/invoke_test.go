@@ -857,6 +857,58 @@ func TestSessionEndsOnATurnThatFailed(t *testing.T) {
 	}
 }
 
+// TestSessionEndsOnAReaderThatBroke pins the fourth way out, and the reason it
+// is not the first. A line past the scanner's ceiling stops the scan, and a
+// listen that only closed its channel would hand that to the session as stdin
+// having run out — a turn somebody typed swallowed, and the run reported a
+// success. It comes back as an error instead, and the turns before it are
+// still answered and still printed.
+func TestSessionEndsOnAReaderThatBroke(t *testing.T) {
+	huge := strings.Repeat("x", maxTurn+1)
+	command, out, _ := session("why is the sky blue?\n" + huge + "\n")
+	provider := answers("rayleigh scattering", "never asked")
+	agent := agents.New(provider, definitions.New(), &recorder{id: "7"}, agents.Turns)
+
+	finished, err := command.session(context.Background(), agent, exchanges.Open(threads.New("")))
+	if err == nil {
+		t.Fatal("session() error = nil, want an error")
+	}
+	if got, want := err.Error(), "could not read the turn"; !strings.Contains(got, want) {
+		t.Errorf("session() error = %q, want it to name %q", got, want)
+	}
+	// The turn before the bad line was answered, and its answer printed.
+	if got, want := len(provider.threads), 1; got != want {
+		t.Errorf("the model was asked %d times, want %d", got, want)
+	}
+	if got, want := out.String(), "rayleigh scattering\n"; got != want {
+		t.Errorf("session() printed %q, want %q", got, want)
+	}
+	// And the id still comes back, so the session can be picked up.
+	if got, want := finished.ID(), "7"; got != want {
+		t.Errorf("session().ID() = %q, want %q", got, want)
+	}
+}
+
+// TestSessionReadsATurnUpToTheCeiling pins the other half of the same change:
+// the ceiling was raised past bufio's default, so a long turn somebody pasted
+// is a turn and not the end of the session.
+func TestSessionReadsATurnUpToTheCeiling(t *testing.T) {
+	long := strings.Repeat("x", 128<<10) // over bufio's own 64KiB default
+	command, _, _ := session(long + "\n")
+	provider := answers("that is a lot of x")
+	agent := agents.New(provider, definitions.New(), &recorder{id: "7"}, agents.Turns)
+
+	if _, err := command.session(context.Background(), agent, exchanges.Open(threads.New(""))); err != nil {
+		t.Fatalf("session() error = %v, want nil", err)
+	}
+	if got, want := len(provider.threads), 1; got != want {
+		t.Fatalf("the model was asked %d times, want %d", got, want)
+	}
+	if got := said(provider.threads[0]); len(got) != 1 || got[0] != "User: "+long {
+		t.Errorf("the turn handed over was not the long line intact")
+	}
+}
+
 // turning is a provider that works until it does not: it hands each call on to
 // the model behind it, and fails once that has run out of replies. It is how a
 // case says "the second turn is the one that goes wrong" without counting
