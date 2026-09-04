@@ -70,7 +70,14 @@ var (
 func blocks(message messages.Type) []sdk.ContentBlockParamUnion {
 	blocks := []sdk.ContentBlockParamUnion{}
 	for _, content := range message.Content() {
-		if text, ok := content.Text(); ok {
+		// An empty one is dropped rather than sent. The API will not
+		// take a text block with nothing in it, and a turn already on
+		// disk carrying one — written before [reply] stopped keeping
+		// them — would otherwise make every later request in that
+		// exchange unsendable. A message left with no blocks at all is
+		// skipped by [provider.parameters], which is the right answer
+		// for a turn that said nothing.
+		if text, ok := content.Text(); ok && text != "" {
 			blocks = append(blocks, sdk.NewTextBlock(text))
 		}
 		if use, ok := content.Use(); ok {
@@ -187,13 +194,21 @@ type provider struct {
 // carrying all of them, in the order they arrived. Text arrives as itself; a
 // tool call arrives whole — id, name and the arguments as the model sent
 // them, which is what pairs the answer with the call later. A block this
-// mapping has no shape for is skipped rather than guessed at, and a response
-// with nothing left after that is no message at all — which [provider.Invoke]
-// reports as an error, since it is the one holding an error return.
+// mapping has no shape for is skipped rather than guessed at, an empty text
+// block is skipped because it says nothing and cannot be sent back, and a
+// response with nothing left after that is no message at all — which
+// [provider.Invoke] reports as an error, since it is the one holding an error
+// return.
 func reply(response *sdk.Message) []messages.Type {
 	content := []messages.Content{}
 	for _, block := range response.Content {
-		if text, ok := block.AsAny().(sdk.TextBlock); ok {
+		// A block with nothing in it is not something the model said,
+		// and it is not something that can be sent back: the API
+		// refuses a text block that is empty, so keeping one would put
+		// a turn in the record that makes every request after it fail.
+		// Dropping it here is why the check in [blocks] is only ever
+		// about turns written before this one existed.
+		if text, ok := block.AsAny().(sdk.TextBlock); ok && text.Text != "" {
 			content = append(content, messages.Text(text.Text))
 		}
 		if tool, ok := block.AsAny().(sdk.ToolUseBlock); ok {

@@ -240,6 +240,29 @@ func TestParameters(t *testing.T) {
 			turns:  []turn{{"user", "text:hello"}},
 		},
 		{
+			// The rescue for a turn written down before the empty
+			// block was dropped where it arrives. The API will not
+			// take one, so it is left out of the request and the
+			// rest of the turn goes as it was.
+			name: "an empty text block is left out of the request",
+			thread: threads.New("",
+				messages.New(roles.User, messages.Text(""), messages.Text("hello")),
+			),
+			turns: []turn{{"user", "text:hello"}},
+		},
+		{
+			// And a turn that is nothing but one is no turn at all,
+			// which is the same answer [parameters] already gives a
+			// message it has no block for.
+			name: "a turn of nothing but an empty text block is skipped",
+			thread: threads.New("",
+				messages.New(roles.User, messages.Text("hello")),
+				messages.New(roles.Assistant, messages.Text("")),
+				messages.New(roles.User, messages.Text("again")),
+			),
+			turns: []turn{{"user", "text:hello"}, {"user", "text:again"}},
+		},
+		{
 			name: "turns keep their roles and their order",
 			thread: threads.New("be brief",
 				messages.New(roles.User, messages.Text("a")),
@@ -551,6 +574,22 @@ func TestInvoke(t *testing.T) {
 			blocks:  []string{text("a"), thinking, text("b")},
 			replies: 1,
 			want:    []string{"text:a", "text:b"},
+		},
+		{
+			// An empty text block says nothing and cannot be sent
+			// back — the API refuses one — so keeping it would put
+			// a turn in the record that makes every request after
+			// it fail. It is dropped where it arrives.
+			name:    "an empty text block is skipped",
+			blocks:  []string{text("a"), text(""), text("b")},
+			replies: 1,
+			want:    []string{"text:a", "text:b"},
+		},
+		{
+			name:    "an empty text block beside a tool call is skipped",
+			blocks:  []string{text(""), toolUse},
+			replies: 1,
+			want:    []string{`use:toolu_1:read_file:{"path":"go.mod"}`},
 		},
 	}
 	for _, c := range cases {
