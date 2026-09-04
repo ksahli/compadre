@@ -54,6 +54,14 @@ func TestPublic(t *testing.T) {
 		{"::ffff:169.254.169.254", false, "metadata written as a mapped v4 address"},
 		{"::ffff:10.0.0.1", false, "RFC 1918 written as a mapped v4 address"},
 		{"::ffff:1.1.1.1", true, "a public address is still public when mapped"},
+
+		// The other v4-in-v6 spelling, which Unmap does not touch and
+		// no predicate in netip has an opinion about.
+		{"::127.0.0.1", false, "loopback written as a compatible v4 address"},
+		{"::169.254.169.254", false, "metadata written as a compatible v4 address"},
+		{"2002:7f00:1::1", false, "loopback wearing a 6to4 hat"},
+		{"2002:a00:1::1", false, "RFC 1918 wearing a 6to4 hat"},
+		{"0.1.2.3", false, "the rest of 'this network', of which only 0.0.0.0 is unspecified"},
 	}
 
 	for _, c := range cases {

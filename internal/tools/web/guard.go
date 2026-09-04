@@ -32,17 +32,19 @@ const (
 // of them is the one that matters — a cloud instance's metadata service is
 // reached over link-local, and carrier-grade NAT space is somebody's LAN.
 var reserved = []netip.Prefix{
-	netip.MustParsePrefix("100.64.0.0/10"),     // carrier-grade NAT
-	netip.MustParsePrefix("192.0.0.0/24"),      // IETF protocol assignments
-	netip.MustParsePrefix("192.0.2.0/24"),      // documentation
-	netip.MustParsePrefix("198.18.0.0/15"),     // benchmarking
-	netip.MustParsePrefix("198.51.100.0/24"),   // documentation
-	netip.MustParsePrefix("203.0.113.0/24"),    // documentation
-	netip.MustParsePrefix("240.0.0.0/4"),       // reserved, and 255.255.255.255 with it
-	netip.MustParsePrefix("64:ff9b::/96"),      // NAT64, which is a v4 address wearing a hat
-	netip.MustParsePrefix("64:ff9b:1::/48"),    // local-use NAT64
-	netip.MustParsePrefix("2001:db8::/32"),     // documentation
-	netip.MustParsePrefix("::ffff:0:0:0:0/96"), // deprecated v4-compatible mapping
+	netip.MustParsePrefix("0.0.0.0/8"),       // "this network", of which IsUnspecified catches only 0.0.0.0
+	netip.MustParsePrefix("100.64.0.0/10"),   // carrier-grade NAT
+	netip.MustParsePrefix("192.0.0.0/24"),    // IETF protocol assignments
+	netip.MustParsePrefix("192.0.2.0/24"),    // documentation
+	netip.MustParsePrefix("198.18.0.0/15"),   // benchmarking
+	netip.MustParsePrefix("198.51.100.0/24"), // documentation
+	netip.MustParsePrefix("203.0.113.0/24"),  // documentation
+	netip.MustParsePrefix("240.0.0.0/4"),     // reserved, and 255.255.255.255 with it
+	netip.MustParsePrefix("64:ff9b::/96"),    // NAT64, which is a v4 address wearing a hat
+	netip.MustParsePrefix("64:ff9b:1::/48"),  // local-use NAT64
+	netip.MustParsePrefix("2001:db8::/32"),   // documentation
+	netip.MustParsePrefix("2002::/16"),       // 6to4, which carries a v4 address anyone may pick
+	netip.MustParsePrefix("::/96"),           // deprecated v4-compatible, '::127.0.0.1' among it
 }
 
 // public says whether an address is somewhere on the open internet, which is
@@ -52,7 +54,10 @@ var reserved = []netip.Prefix{
 //
 // The unmap is the first line and not an afterthought: '::ffff:127.0.0.1' is
 // loopback written as a v6 address, and a check that asked the v6 form whether
-// it was loopback would be told no.
+// it was loopback would be told no. That is the mapped spelling and it is the
+// only one Unmap knows; the compatible spelling '::127.0.0.1' is a different
+// range that nothing in netip has a predicate for, which is what the '::/96'
+// below is there for.
 func public(addr netip.Addr) bool {
 	addr = addr.Unmap()
 	if !addr.IsValid() {
