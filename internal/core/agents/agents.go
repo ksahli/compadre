@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/ksahli/compadre/internal/core/exchanges"
@@ -30,6 +31,12 @@ type (
 // a number this package keeps to itself. The ceiling an agent actually runs to
 // is the one it was built with; this is only the number to reach for.
 const Turns = 10
+
+// errUnanswered is what a call left hanging is answered with. It is written
+// the way any tool that could not run is written, because that is what
+// happened: the tool did not run, and the model is the one that has to decide
+// what to do about it.
+var errUnanswered = errors.New("the tool did not run: the exchange stopped before it could be answered")
 
 // Type is an agent: a model to reach, the tools it may ask for, and where the
 // record of what happened is kept. All three are what the agent is, which is
@@ -81,12 +88,20 @@ func New(provider Provider, registry Registry, store Store, turns int) Type {
 //
 // The first error ends the run, and the turn it failed on contributes nothing:
 // a reply that failed is not a reply.
+//
+// An exchange handed over with a call nobody answered — the shape a run that
+// was interrupted mid-turn leaves behind — is answered before anything else
+// happens. See [repaired].
 func (a Type) Converse(ctx Context, exchange Exchange) (Exchange, error) {
 	// The opening turn is written down before the model is asked anything,
 	// so that a run refused on its first round trip still left behind what
 	// it was asked to do. It is also what mints the id, which means the
 	// exchange has one from here on and every later save writes under it.
-	exchange, err := a.save(ctx, exchange)
+	//
+	// An exchange arriving with a call left unanswered is answered first,
+	// so that the repair goes down with it: what was picked up broken is
+	// filed mended, and is not broken again the next time it is read back.
+	exchange, err := a.save(ctx, repaired(exchange))
 	if err != nil {
 		return exchange, err
 	}
@@ -141,13 +156,68 @@ func (a Type) Converse(ctx Context, exchange Exchange) (Exchange, error) {
 	return exchange, fmt.Errorf("gave up after %d turns: the model kept asking for tools", a.turns)
 }
 
+// repaired is the exchange with any call left unanswered answered.
+//
+// The loop writes the model's turn down before it runs what that turn asked
+// for, and it has to: a result with no call ahead of it is not something the
+// model can read. The cost of that ordering is a window, and a run that ends
+// inside it — killed, or over a store that failed on the second write — leaves
+// a record ending in a call nothing replied to.
+//
+// That is not a thread anything can be asked to continue. A provider is
+// entitled to refuse a turn whose call was never answered, and the ones worth
+// reaching do, so the exchange would be filed under an id that can be read
+// back and never carried on. Answering the calls here is what makes every
+// exchange in the record resumable, including the ones written before there
+// was anything to repair them.
+//
+// Only the last turn is looked at, because it is the only place a call can be
+// left hanging: the loop answers every call in the turn it was made in before
+// it goes round again.
+func repaired(exchange Exchange) Exchange {
+	thread := exchange.Thread()
+
+	conversation := thread.Messages()
+	if len(conversation) == 0 {
+		return exchange
+	}
+
+	last := conversation[len(conversation)-1]
+	if last.Role() != roles.Assistant {
+		return exchange
+	}
+
+	answers := []messages.Content{}
+	for _, content := range last.Content() {
+		if request, ok := content.Use(); ok {
+			answers = append(answers, messages.Result(tools.Failure(request.ID(), errUnanswered)))
+		}
+	}
+	if len(answers) == 0 {
+		return exchange
+	}
+
+	return exchange.With(thread.Append(messages.New(roles.User, answers...)))
+}
+
 // save writes the exchange down and returns it filed. A store that cannot
 // write ends the run, unlike a tool that cannot run: a failed tool is a result
 // the model reads and tries again from, and a record that is not being kept is
 // not something the model can do anything about. The exchange comes back
 // either way, because what could not be written is still what was said.
+//
+// The write outlives a cancelled run, which is what the context is stripped of
+// its cancellation for. An interrupt landing mid-turn would otherwise fail the
+// write that was about to record the turn just paid for, and — worse — the one
+// that answers a call already written down, leaving behind a record that ends
+// in a question nothing replies to. Cancelling is how a caller says it no
+// longer wants the answer; it is not how it says the exchange never happened.
+//
+// What that costs is a turn that cannot be interrupted while the store is
+// wedged. The store is a local database with a busy timeout on it, so the wait
+// is bounded, and a bounded wait is worth a record that is always whole.
 func (a Type) save(ctx Context, exchange Exchange) (Exchange, error) {
-	saved, err := a.store.Save(ctx, exchange)
+	saved, err := a.store.Save(context.WithoutCancel(ctx), exchange)
 	if err != nil {
 		return exchange, fmt.Errorf("could not keep the record of the exchange: %w", err)
 	}

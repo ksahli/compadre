@@ -55,6 +55,19 @@
 // for that reason: by the time the loop is leaving, whatever it had was
 // already written.
 //
+// The ordering has a window in it, and the window is worth naming because
+// something has to answer for it. Between the write that records a call and
+// the write that records the answer, the record is in the one state nothing
+// can continue from: a call with nothing replying to it, which a provider is
+// entitled to refuse a turn over. Two things close it. A write is made on a
+// context stripped of its cancellation, so an interrupt landing mid-turn still
+// lands the answer — cancelling is how a caller says it no longer wants the
+// answer, not how it says the exchange never happened. And an exchange that
+// arrives in that state anyway, because a process was killed outright or was
+// written before any of this was, has its hanging calls answered as failures
+// before the model is asked anything. What that buys is the thing the record
+// is for: every exchange in it can be picked back up.
+//
 // A store that cannot write ends the run, and that is the one failure here
 // treated differently from a tool's. A tool that failed is a result the model
 // reads and recovers from, because trying something else is a thing a model

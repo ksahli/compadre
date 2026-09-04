@@ -74,11 +74,13 @@ type recorder struct {
 	failOn int
 	saves  []string
 	filed  []string
+	live   []bool // whether the context each write arrived on was still live
 }
 
-func (r *recorder) Save(_ context.Context, exchange exchanges.Type) (exchanges.Type, error) {
+func (r *recorder) Save(ctx context.Context, exchange exchanges.Type) (exchanges.Type, error) {
 	r.filed = append(r.filed, exchange.ID())
 	r.saves = append(r.saves, strings.Join(record(exchange.Thread()), " "))
+	r.live = append(r.live, ctx.Err() == nil)
 
 	if r.fail != nil && len(r.saves) >= r.failOn {
 		return exchange, r.fail
@@ -509,4 +511,163 @@ func TestConverseStopsWhenTheRecordCannotBeKept(t *testing.T) {
 			t.Errorf("thread = %v, want %v", got, want)
 		}
 	})
+}
+
+// hanging is the exchange a run interrupted mid-turn leaves behind: the
+// model's turn is written down, because the loop has to write it before it can
+// answer what it asks for, and then nothing answered it.
+func hanging() exchanges.Type {
+	return exchanges.New("7", opening().Append(
+		messages.New(roles.Assistant, messages.Use(use.New("toolu_1", "works", use.Arguments(`{}`)))),
+	))
+}
+
+// TestConverseAnswersACallLeftHanging pins the repair. An exchange whose last
+// turn is a call nobody answered is not one a provider will take, so it would
+// be filed under an id that reads back and never carries on. The call is
+// answered — as a failure, because that is what became of it — before the
+// model is asked anything.
+func TestConverseAnswersACallLeftHanging(t *testing.T) {
+	provider := &model{replies: [][]messages.Type{says("picking up where we left off")}}
+	recorder := store()
+
+	agent := agents.New(provider, registry(), recorder, agents.Turns)
+	finished, err := agent.Converse(context.Background(), hanging())
+	if err != nil {
+		t.Fatalf("Converse() error = %v, want nil", err)
+	}
+
+	// The model is handed the answer, not the question on its own.
+	if got, want := provider.calls(), 1; got != want {
+		t.Fatalf("the model was asked %d times, want %d", got, want)
+	}
+	want := []string{
+		"User(text:hello)",
+		"Assistant(use:toolu_1:works)",
+		"User(result:toolu_1:failed:the tool did not run: the exchange stopped before it could be answered)",
+	}
+	if got := record(provider.threads[0]); !slices.Equal(got, want) {
+		t.Errorf("the model was handed %v, want %v", got, want)
+	}
+
+	// And the repair is written down rather than only held: an exchange
+	// picked up broken is filed mended.
+	if len(recorder.saves) == 0 {
+		t.Fatal("the store was not written to at all")
+	}
+	if got, want := recorder.saves[0], strings.Join(want, " "); got != want {
+		t.Errorf("the first write was %q, want %q", got, want)
+	}
+
+	// The tool itself is not run. What it would have answered is not what
+	// happened, and the model is the one that decides whether to ask again.
+	if got := record(finished.Thread()); slices.Contains(got, "User(result:toolu_1:ok:the answer)") {
+		t.Errorf("the hanging call was run rather than refused: %v", got)
+	}
+}
+
+// TestConverseLeavesAFinishedExchangeAlone pins the other side of the repair:
+// it is for the one shape that cannot be continued, and nothing else. An
+// exchange that ended on an answer, and one whose calls were all answered, are
+// both carried on as they are.
+func TestConverseLeavesAFinishedExchangeAlone(t *testing.T) {
+	cases := []struct {
+		name   string
+		thread threads.Type
+	}{
+		{
+			name:   "one that ended on what the model said",
+			thread: opening().Append(says("rayleigh scattering")...),
+		},
+		{
+			name: "one whose call was answered",
+			thread: opening().Append(
+				messages.New(roles.Assistant, messages.Use(use.New("toolu_1", "works", use.Arguments(`{}`)))),
+				messages.New(roles.User, messages.Result(tools.Success("toolu_1", "the answer"))),
+			),
+		},
+		{
+			name:   "one with nothing said in it yet",
+			thread: threads.New("be brief"),
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			provider := &model{replies: [][]messages.Type{says("carrying on")}}
+			agent := agents.New(provider, registry(), store(), agents.Turns)
+
+			if _, err := agent.Converse(context.Background(), exchanges.New("7", c.thread)); err != nil {
+				t.Fatalf("Converse() error = %v, want nil", err)
+			}
+			if got, want := provider.calls(), 1; got != want {
+				t.Fatalf("the model was asked %d times, want %d", got, want)
+			}
+			want := record(c.thread)
+			if got := record(provider.threads[0]); !slices.Equal(got, want) {
+				t.Errorf("the model was handed %v, want %v untouched", got, want)
+			}
+		})
+	}
+}
+
+// cancelling is a provider that pulls the context out from under the run the
+// way an interrupt does: it answers its first call and cancels as it returns,
+// so the tools that follow and the write that records them happen on a context
+// that is already done.
+type cancelling struct {
+	model  *model
+	cancel context.CancelFunc
+}
+
+func (c *cancelling) Invoke(ctx context.Context, thread threads.Type, registry tools.Registry) ([]messages.Type, error) {
+	if err := ctx.Err(); err != nil {
+		c.model.threads = append(c.model.threads, thread)
+		return nil, err
+	}
+	replies, err := c.model.Invoke(ctx, thread, registry)
+	c.cancel()
+	return replies, err
+}
+
+// TestConverseWritesTheRecordThoughTheRunWasCancelled is the bug this repair
+// is the other half of. The loop writes the model's turn down before it runs
+// what that turn asked for; an interrupt landing in between used to fail the
+// write that answers it, leaving a record ending in a call nothing replied to
+// — the one shape that cannot be picked back up. The writes outlive the
+// cancellation, so what is left behind is whole.
+func TestConverseWritesTheRecordThoughTheRunWasCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	provider := &cancelling{
+		model:  &model{replies: [][]messages.Type{asks("toolu_1", "works")}},
+		cancel: cancel,
+	}
+	recorder := store()
+
+	agent := agents.New(provider, registry(), recorder, agents.Turns)
+	finished, err := agent.Converse(ctx, unfiled())
+
+	// The run ends, because the caller asked it to.
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Converse() error = %v, want it to be context.Canceled", err)
+	}
+
+	// But the record is whole: the call and the answer to it, not a call
+	// on its own.
+	want := []string{
+		"User(text:hello)",
+		"Assistant(use:toolu_1:works)",
+		"User(result:toolu_1:ok:the answer)",
+	}
+	if got := record(finished.Thread()); !slices.Equal(got, want) {
+		t.Errorf("Converse() came back with %v, want %v", got, want)
+	}
+	if got, want := recorder.saves[len(recorder.saves)-1], strings.Join(want, " "); got != want {
+		t.Errorf("the last write was %q, want %q", got, want)
+	}
+	if slices.Contains(recorder.live, false) {
+		t.Error("a write arrived on a context that was already done, and would have failed against a real store")
+	}
 }
