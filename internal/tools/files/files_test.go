@@ -15,7 +15,9 @@ import (
 //	.
 //	├── .gitignore
 //	├── .git/
-//	│   └── HEAD
+//	│   ├── HEAD
+//	│   └── objects/
+//	│       └── packfile
 //	├── README.md
 //	├── binary.dat
 //	├── empty/
@@ -41,7 +43,7 @@ func workspace(t *testing.T) (root, outside string) {
 	root, outside = filepath.Join(base, "workspace"), filepath.Join(base, "outside")
 
 	for _, dir := range []string{
-		filepath.Join(root, ".git"),
+		filepath.Join(root, ".git", "objects"),
 		filepath.Join(root, "empty"),
 		filepath.Join(root, "internal", "core"),
 		filepath.Join(outside, "secret"),
@@ -55,6 +57,7 @@ func workspace(t *testing.T) (root, outside string) {
 		filepath.Join(root, ".gitignore"),
 		filepath.Join(root, "README.md"),
 		filepath.Join(root, ".git", "HEAD"),
+		filepath.Join(root, ".git", "objects", "packfile"),
 		filepath.Join(root, "internal", "notes.txt"),
 		filepath.Join(root, "internal", "core", "tools.go"),
 		filepath.Join(outside, "secret", "keys.txt"),

@@ -57,9 +57,12 @@
 // Some limits are policy rather than mechanism, and are worth saying out loud.
 //
 // .git is inside the workspace and is treated as neither in nor out. [List]
-// names the directory, so the model can see it is there, but does not walk
-// into it: it holds thousands of files that would spend the whole ceiling
-// before the walk reached anything asked about. [Read] refuses anything inside
+// names the directory, so the model can see it is there, but neither walks
+// into it nor answers about it when pointed at it directly: it holds thousands
+// of files that would spend the whole ceiling before the walk reached anything
+// asked about. Both halves of that are needed and the second is the one easy
+// to leave out — a walk can only decline to descend into a .git it met on the
+// way, and a listing asked for .git itself never meets it. [Read] refuses anything inside
 // it outright — no question about what a project is or does is answered by a
 // packfile, and a tool that will not list those paths has no business handing
 // one back when asked for it directly. [Write] is refused there for the

@@ -83,6 +83,15 @@ func (tool List) Execute(ctx context.Context, raw use.Arguments) (string, error)
 	if err != nil {
 		return "", err
 	}
+	// Judged on the resolved path, so a link into .git is refused the same
+	// as naming it outright. It comes before the question of what the path
+	// is, unlike the sibling tools' version of this check: the walk below
+	// only declines to descend into a .git it met on the way, so without
+	// this the one thing it would answer about is the one directory this
+	// package promises never to open up.
+	if tool.git(directory) {
+		return "", fmt.Errorf("the contents of .git are not listed: '%s'", args.Path)
+	}
 	if !info.IsDir() {
 		return "", fmt.Errorf("not a directory: '%s'", args.Path)
 	}

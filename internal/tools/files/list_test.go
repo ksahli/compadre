@@ -212,6 +212,31 @@ func TestListExecuteRefuses(t *testing.T) {
 			path: "here",
 			want: "not a directory: 'here'",
 		},
+		{
+			// .git is named by a listing of the root and is not
+			// opened up by one of its own. The walk declining to
+			// descend into it is not enough on its own: a walk
+			// that starts there never meets it on the way.
+			name: ".git itself",
+			path: ".git",
+			want: "the contents of .git are not listed: '.git'",
+		},
+		{
+			name:      ".git itself, walked",
+			path:      ".git",
+			recursive: true,
+			want:      "the contents of .git are not listed: '.git'",
+		},
+		{
+			name: "somewhere inside .git",
+			path: ".git/objects",
+			want: "the contents of .git are not listed: '.git/objects'",
+		},
+		{
+			name: ".git named the long way round",
+			path: "internal/../.git",
+			want: "the contents of .git are not listed: 'internal/../.git'",
+		},
 	}
 
 	for _, c := range cases {
