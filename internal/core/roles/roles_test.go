@@ -8,8 +8,9 @@ import (
 
 // TestValues pins the strings themselves, which reads as noise until you know
 // what switches on them: every provider maps a role by comparing against these
-// constants, so a changed value drops the messages carrying it rather than
-// failing to compile. See the mapping in the anthropic adapter's parameters.
+// constants, so a changed value makes the adapter refuse every message carrying
+// it — a failure at run time, on a real exchange, rather than at compile time.
+// See the mapping in the anthropic adapter's parameters.
 func TestValues(t *testing.T) {
 	cases := []struct {
 		name string

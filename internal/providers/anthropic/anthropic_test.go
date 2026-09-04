@@ -405,6 +405,33 @@ func TestParameters(t *testing.T) {
 			refused: "Stranger",
 		},
 		{
+			// The half of the refusal the emptiness skip used to
+			// swallow. A turn nobody can place is a gap in the
+			// record whether or not it said anything, so it is
+			// refused rather than passed over as a turn that said
+			// nothing.
+			name: "an unmappable role with nothing in it is still refused",
+			thread: threads.New("",
+				messages.New(roles.User, messages.Text("a")),
+				messages.New("Stranger"),
+				messages.New(roles.User, messages.Text("c")),
+			),
+			refused: "Stranger",
+		},
+		{
+			// And the shape that actually arrives from a record
+			// written before the empty block was dropped where it
+			// lands: the turn says something, the mapping has no
+			// block for it, and what is left is a gap all the same.
+			name: "an unmappable role saying nothing sendable is still refused",
+			thread: threads.New("",
+				messages.New(roles.User, messages.Text("a")),
+				messages.New("Stranger", messages.Text("")),
+				messages.New(roles.User, messages.Text("c")),
+			),
+			refused: "Stranger",
+		},
+		{
 			// A turn with nothing in it is not sent: the API has no
 			// shape for a message that says nothing, and an empty
 			// content array is not the same as an empty sentence.

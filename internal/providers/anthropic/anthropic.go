@@ -200,25 +200,36 @@ func catalogue(registry tools.Registry) []sdk.ToolUnionParam {
 // in the record, which is a worse answer than saying so. It is the same
 // refusal [provider.Invoke] makes of a response that is no reply.
 //
+// The two are settled in that order, and the order is the whole of it. Whether
+// a turn can be placed at all is a question about the record; whether it said
+// anything is a question about its contents. Asking the second one first lets
+// the skip swallow the refusal: a turn under a word this adapter has no part
+// for would go quietly whenever it happened to leave [blocks] with nothing,
+// and that is not only the empty turn, since [blocks] has arms for four kinds
+// of content and drops whatever it cannot map.
+//
 // It is a method rather than a function because the model and the ceiling are
 // what the adapter was built with, not something a thread carries: the core
 // has no vocabulary for either and should not grow one.
 func (p *provider) parameters(thread threads.Type, registry tools.Registry) (sdk.MessageNewParams, error) {
 	turns := []sdk.MessageParam{}
 	for _, message := range thread.Messages() {
-		content := blocks(message)
-		if len(content) == 0 {
-			continue
-		}
+		var turn func(...sdk.ContentBlockParamUnion) sdk.MessageParam
 		switch message.Role() {
 		case roles.User:
-			turns = append(turns, sdk.NewUserMessage(content...))
+			turn = sdk.NewUserMessage
 		case roles.Assistant:
-			turns = append(turns, sdk.NewAssistantMessage(content...))
+			turn = sdk.NewAssistantMessage
 		default:
 			return sdk.MessageNewParams{}, fmt.Errorf(
 				"the exchange holds a turn taken by '%s', which this API has no part for", message.Role())
 		}
+
+		content := blocks(message)
+		if len(content) == 0 {
+			continue
+		}
+		turns = append(turns, turn(content...))
 	}
 
 	parameters := sdk.MessageNewParams{
