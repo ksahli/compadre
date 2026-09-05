@@ -151,6 +151,36 @@ func failing(t *testing.T, status int, kind string) []anthropic.Option {
 	return options(server.URL)
 }
 
+// unreliable stands in for an API that is briefly not answering: the first
+// failing requests get a 500, and the one after them the reply. Unlike
+// [options] it leaves the retries alone, since it exists for the cases where
+// the retrying is the thing under test.
+//
+// The Retry-After-Ms header is what keeps those cases quick. The SDK honours it
+// verbatim, so a retry it is told to make at once is made at once rather than
+// after the backoff a real API turning requests away would deserve. The counter
+// it returns is how many times the server was asked.
+func unreliable(t *testing.T, failing int, body string) (*int, []anthropic.Option) {
+	t.Helper()
+	calls := new(int)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*calls++
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After-Ms", "0")
+		if *calls <= failing {
+			w.WriteHeader(http.StatusInternalServerError)
+			io.WriteString(w, `{"type":"error","error":{"type":"api_error","message":"boom"}}`)
+			return
+		}
+		io.WriteString(w, body)
+	}))
+	t.Cleanup(server.Close)
+	return calls, []anthropic.Option{
+		option.WithBaseURL(server.URL),
+		option.WithAPIKey("test"),
+	}
+}
+
 // said renders one content block as a line a table can state, naming the
 // shape it turned out to be so that a call and a sentence about a call are
 // never mistaken for one another.
@@ -404,7 +434,7 @@ func TestParameters(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			captured, calls, options := stub(t, reply(text("hola")))
 
-			_, err := anthropic.New("", 0, options...).Invoke(context.Background(), c.thread, c.registry)
+			_, err := anthropic.New("", 0, 0, options...).Invoke(context.Background(), c.thread, c.registry)
 			if c.refused != "" {
 				if err == nil {
 					t.Fatalf("Invoke() error = nil, want an error")
@@ -488,7 +518,7 @@ func TestParametersOffersTheRegistry(t *testing.T) {
 
 	thread := threads.New("", messages.New(roles.User, messages.Text("hello")))
 	registry := definitions.New(weather, clock)
-	if _, err := anthropic.New("", 0, options...).Invoke(context.Background(), thread, registry); err != nil {
+	if _, err := anthropic.New("", 0, 0, options...).Invoke(context.Background(), thread, registry); err != nil {
 		t.Fatalf("Invoke() error = %v, want nil", err)
 	}
 
@@ -559,7 +589,7 @@ func TestParametersOffersNothingWithoutTools(t *testing.T) {
 			captured, _, options := stub(t, reply(text("hola")))
 
 			thread := threads.New("", messages.New(roles.User, messages.Text("hello")))
-			if _, err := anthropic.New("", 0, options...).Invoke(context.Background(), thread, c.registry); err != nil {
+			if _, err := anthropic.New("", 0, 0, options...).Invoke(context.Background(), thread, c.registry); err != nil {
 				t.Fatalf("Invoke() error = %v, want nil", err)
 			}
 
@@ -567,6 +597,101 @@ func TestParametersOffersNothingWithoutTools(t *testing.T) {
 				t.Errorf("tools = %v, want them omitted", captured.Tools)
 			}
 		})
+	}
+}
+
+// TestRetriesWhatTheAPITurnedAway pins the third of the bounds that are the
+// adapter's rather than the thread's. The number is the caller's, the retrying
+// is the SDK's, and what this covers is the join between them: that the number
+// reaches the client at all, that it is the ceiling on the requests after the
+// first rather than on the requests, and that a caller with no opinion gets
+// [anthropic.Retries] the way one with no opinion about the ceiling gets
+// [anthropic.Tokens].
+//
+// The failure retried is a 500, which is the one the API answers when it is
+// overloaded and the one worth waiting out. What survives the last retry is
+// still [anthropic.ErrUnavailable] — retrying changes how many times the
+// request was sent, not what this package calls the refusal that outlived it.
+func TestRetriesWhatTheAPITurnedAway(t *testing.T) {
+	cases := []struct {
+		name     string
+		retries  int
+		failing  int
+		attempts int
+		want     error
+	}{
+		{
+			name:     "a failure inside the retries the caller asked for",
+			retries:  3,
+			failing:  2,
+			attempts: 3,
+		},
+		{
+			name:     "more failures than the caller asked to sit through",
+			retries:  1,
+			failing:  3,
+			attempts: 2,
+			want:     anthropic.ErrUnavailable,
+		},
+		{
+			name:     "the package's own where the caller asked for none",
+			failing:  anthropic.Retries,
+			attempts: anthropic.Retries + 1,
+		},
+		{
+			// A count nobody could have meant falls back rather
+			// than going out, for the reason a ceiling of -1 does:
+			// the SDK panics on a negative, and a value nobody
+			// chose has no business ending the process.
+			name:     "the package's own where the retries are no retries",
+			retries:  -1,
+			failing:  anthropic.Retries,
+			attempts: anthropic.Retries + 1,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			calls, options := unreliable(t, c.failing, reply(text("hola")))
+
+			thread := threads.New("", messages.New(roles.User, messages.Text("hello")))
+			replies, err := anthropic.New("", 0, c.retries, options...).Invoke(context.Background(), thread, nil)
+
+			if !errors.Is(err, c.want) {
+				t.Fatalf("Invoke() error = %v, want %v", err, c.want)
+			}
+			if *calls != c.attempts {
+				t.Errorf("the API was asked %d times, want %d", *calls, c.attempts)
+			}
+			if c.want != nil {
+				return
+			}
+			if len(replies) != 1 {
+				t.Fatalf("Invoke() = %d replies, want 1", len(replies))
+			}
+			if got := said(replies[0].Content()[0]); got != "text:hola" {
+				t.Errorf("reply = %q, want %q", got, "text:hola")
+			}
+		})
+	}
+}
+
+// TestRetriesAreTheCallersToOverrule pins the option order. The retries go into
+// the client ahead of whatever the caller passed, so a caller with an opinion
+// of its own still has the last word — which is what every other test in this
+// file relies on, since [options] turns the retrying off to serve one failing
+// response and assert it was asked for once.
+func TestRetriesAreTheCallersToOverrule(t *testing.T) {
+	calls, endpoint := unreliable(t, 1, reply(text("hola")))
+	options := append(endpoint, option.WithMaxRetries(0))
+
+	thread := threads.New("", messages.New(roles.User, messages.Text("hello")))
+	_, err := anthropic.New("", 0, 5, options...).Invoke(context.Background(), thread, nil)
+
+	if !errors.Is(err, anthropic.ErrUnavailable) {
+		t.Fatalf("Invoke() error = %v, want %v", err, anthropic.ErrUnavailable)
+	}
+	if *calls != 1 {
+		t.Errorf("the API was asked %d times, want 1", *calls)
 	}
 }
 
@@ -610,7 +735,7 @@ func TestParametersCarriesTheModelAndCeiling(t *testing.T) {
 			captured, _, options := stub(t, reply(text("hola")))
 
 			thread := threads.New("", messages.New(roles.User, messages.Text("hello")))
-			if _, err := anthropic.New(c.model, c.tokens, options...).Invoke(context.Background(), thread, nil); err != nil {
+			if _, err := anthropic.New(c.model, c.tokens, 0, options...).Invoke(context.Background(), thread, nil); err != nil {
 				t.Fatalf("Invoke() error = %v, want nil", err)
 			}
 
@@ -704,7 +829,7 @@ func TestInvoke(t *testing.T) {
 			_, calls, options := stub(t, reply(c.blocks...))
 
 			thread := threads.New("", messages.New(roles.User, messages.Text("hello")))
-			replies, err := anthropic.New("", 0, options...).Invoke(context.Background(), thread, nil)
+			replies, err := anthropic.New("", 0, 0, options...).Invoke(context.Background(), thread, nil)
 			if err != nil {
 				t.Fatalf("Invoke() error = %v, want nil", err)
 			}
@@ -787,7 +912,7 @@ func TestInvokeRefusesANonReply(t *testing.T) {
 			_, calls, options := stub(t, c.body)
 
 			thread := threads.New("", messages.New(roles.User, messages.Text("hello")))
-			replies, err := anthropic.New("", 0, options...).Invoke(context.Background(), thread, nil)
+			replies, err := anthropic.New("", 0, 0, options...).Invoke(context.Background(), thread, nil)
 			if err == nil {
 				t.Fatalf("Invoke() error = nil, want an error")
 			}
@@ -834,7 +959,7 @@ func TestInvokeReportsFailure(t *testing.T) {
 			options := failing(t, c.status, c.kind)
 
 			thread := threads.New("", messages.New(roles.User, messages.Text("hello")))
-			replies, err := anthropic.New("", 0, options...).Invoke(context.Background(), thread, nil)
+			replies, err := anthropic.New("", 0, 0, options...).Invoke(context.Background(), thread, nil)
 			if !errors.Is(err, c.want) {
 				t.Errorf("Invoke() error = %v, want %v", err, c.want)
 			}
@@ -859,7 +984,7 @@ func TestInvokeReportsWhatWasNotTheAPIs(t *testing.T) {
 	cancel()
 
 	thread := threads.New("", messages.New(roles.User, messages.Text("hello")))
-	replies, err := anthropic.New("", 0, options...).Invoke(ctx, thread, nil)
+	replies, err := anthropic.New("", 0, 0, options...).Invoke(ctx, thread, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("Invoke() error = %v, want %v", err, context.Canceled)
 	}

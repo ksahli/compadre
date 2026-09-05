@@ -25,7 +25,8 @@ Commands:
 invoke takes one turn with -message, or reads them from stdin a line at a
 time if there is none. What the run is bounded by is the caller's to choose:
 -model and -max-tokens for the model to reach and how much of a reply it may
-write, -workspace for the directory the file tools may see, and -max-turns for
+write, -max-retries for how many times a request the API turned away is sent
+again, -workspace for the directory the file tools may see, and -max-turns for
 how many turns one exchange may take. An absent one of those is the value that
 was true before there was a flag to say otherwise.
 

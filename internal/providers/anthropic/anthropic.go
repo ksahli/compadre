@@ -29,13 +29,21 @@ type (
 )
 
 // Model is the model an adapter reaches when it is built without one named,
-// and Tokens the ceiling on one reply when it is built without one. They are
-// stated here rather than at the wiring because which model this vendor has
-// and what a sensible ceiling on it is are facts about this API, and this is
-// the package entitled to know them.
+// Tokens the ceiling on one reply when it is built without one, and Retries
+// how many times a request the API turned away is sent again. They are stated
+// here rather than at the wiring because which model this vendor has, what a
+// sensible ceiling on it is and how much of its turning requests away is worth
+// waiting out are facts about this API, and this is the package entitled to
+// know them.
+//
+// Retries is the SDK's own default said out loud. It was already the number
+// every run used; naming it is what lets a caller state it, and what lets one
+// who wants a different number say so rather than discover the current one by
+// reading someone else's source.
 const (
-	Model        = string(sdk.ModelClaudeSonnet5)
-	Tokens int64 = 1024
+	Model         = string(sdk.ModelClaudeSonnet5)
+	Tokens  int64 = 1024
+	Retries       = 2
 )
 
 // The ways an exchange can end without an answer: what the API said when it
@@ -398,24 +406,47 @@ func (p *provider) Invoke(ctx Context, thread threads.Type, registry tools.Regis
 // port rather than a concrete type: whoever calls this is the wiring, and
 // everything downstream of it should see only [inference.Provider].
 //
-// The model and the ceiling on one reply are arguments because they are the
-// caller's to choose, and an adapter built with the wrong one is not degraded
-// but pointed at a different model. A caller with no opinion says so by
-// passing an empty model or a ceiling of zero, and gets [Model] and [Tokens];
-// that is a fallback rather than validation, so that a value nobody chose can
-// never go out as a request asking for no tokens at all.
+// The model, the ceiling on one reply and the retries are arguments because
+// they are the caller's to choose, and an adapter built with the wrong one is
+// not degraded but pointed at a different model, or held to a different bound.
+// A caller with no opinion says so by passing an empty model, a ceiling of zero
+// or no retries at all, and gets [Model], [Tokens] and [Retries]; that is a
+// fallback rather than validation, so that a value nobody chose can never go
+// out as a request asking for no tokens at all.
+//
+// The retrying itself is the SDK's, which is the whole reason the number is
+// handed to it rather than acted on here: it knows which statuses are worth a
+// second request, how long to wait before it, and what the API's own
+// Retry-After said about that. Nothing in this package would do any of it
+// better by doing it again.
+//
+// That is a different line from the one [failed] draws, and the two should not
+// be read as one. The SDK decides what to send again; this package decides what
+// to call the failure that survived being sent again, and whether a caller at a
+// prompt can do anything about it. A rate limit is retried and then, if it is
+// still a rate limit, reported as a turn that did not happen; credentials the
+// API will not take are [failures.ErrSettled] however many times they are
+// offered.
+//
+// The retries go in ahead of the caller's own options, because a later option
+// wins here. A caller that has an opinion about retrying — a test serving one
+// failing response and asserting it was asked once — says so with an [Option]
+// and is not overruled by the number that arrived as an argument.
 //
 // Credentials come from the environment unless an [Option] says otherwise.
-func New(model string, tokens int64, options ...Option) inference.Provider {
+func New(model string, tokens int64, retries int, options ...Option) inference.Provider {
 	if model == "" {
 		model = Model
 	}
 	if tokens <= 0 {
 		tokens = Tokens
 	}
+	if retries <= 0 {
+		retries = Retries
+	}
 
 	return &provider{
-		client: sdk.NewClient(options...),
+		client: sdk.NewClient(append([]Option{option.WithMaxRetries(retries)}, options...)...),
 		model:  model,
 		tokens: tokens,
 	}

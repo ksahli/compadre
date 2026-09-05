@@ -39,6 +39,7 @@ func TestNew(t *testing.T) {
 		store        string
 		model        string
 		tokens       int64
+		retries      int
 		directory    string
 		turns        int
 	}{
@@ -109,6 +110,12 @@ func TestNew(t *testing.T) {
 			tokens:    4096,
 		},
 		{
+			name:      "retries of a request the API turned away",
+			arguments: []string{"-max-retries", "5", "-message", "hello"},
+			input:     "hello",
+			retries:   5,
+		},
+		{
 			name:      "a workspace somewhere other than here",
 			arguments: []string{"-workspace", "/tmp", "-message", "hello"},
 			input:     "hello",
@@ -125,14 +132,15 @@ func TestNew(t *testing.T) {
 			// defaults are reached for at Execute, and passing it
 			// outright is the same as passing nothing.
 			name:      "a ceiling explicitly left to the defaults",
-			arguments: []string{"-max-tokens", "0", "-max-turns", "0"},
+			arguments: []string{"-max-tokens", "0", "-max-turns", "0", "-max-retries", "0"},
 		},
 		{
-			name:         "all four bounds at once",
-			arguments:    []string{"-model", "claude-opus-5", "-max-tokens", "4096", "-workspace", "/tmp", "-max-turns", "25", "-instructions", "be brief"},
+			name:         "all five bounds at once",
+			arguments:    []string{"-model", "claude-opus-5", "-max-tokens", "4096", "-max-retries", "5", "-workspace", "/tmp", "-max-turns", "25", "-instructions", "be brief"},
 			instructions: "be brief",
 			model:        "claude-opus-5",
 			tokens:       4096,
+			retries:      5,
 			directory:    "/tmp",
 			turns:        25,
 		},
@@ -164,6 +172,9 @@ func TestNew(t *testing.T) {
 			if command.tokens != c.tokens {
 				t.Errorf("tokens = %d, want %d", command.tokens, c.tokens)
 			}
+			if command.retries != c.retries {
+				t.Errorf("retries = %d, want %d", command.retries, c.retries)
+			}
 			if command.directory != c.directory {
 				t.Errorf("directory = %q, want %q", command.directory, c.directory)
 			}
@@ -187,7 +198,7 @@ func TestNewReportsHelpAsItsUsage(t *testing.T) {
 			if command != nil {
 				t.Errorf("New() = %v, want nil on error", command)
 			}
-			for _, want := range []string{"-instructions", "-message", "-exchange", "-store", "-model", "-max-tokens", "-workspace", "-max-turns"} {
+			for _, want := range []string{"-instructions", "-message", "-exchange", "-store", "-model", "-max-tokens", "-max-retries", "-workspace", "-max-turns"} {
 				if got := err.Error(); !strings.Contains(got, want) {
 					t.Errorf("New() error = %q, want it to name %q", got, want)
 				}
@@ -209,12 +220,14 @@ func TestNewRejectsUnparseableArguments(t *testing.T) {
 		{"a positional where a flag belongs", []string{"-instructions", "be brief", "-nope", "x"}},
 		{"a ceiling that is not a number", []string{"-max-tokens", "plenty"}},
 		{"turns that are not a number", []string{"-max-turns", "lots"}},
+		{"retries that are not a number", []string{"-max-retries", "often"}},
 		// These two parse as numbers and are refused here rather
 		// than by the flag set: -3 is a bound nobody could have
 		// meant, and running with a different one would be an
 		// answer to a question nobody asked.
 		{"a ceiling below zero", []string{"-max-tokens", "-3"}},
 		{"turns below zero", []string{"-max-turns", "-3"}},
+		{"retries below zero", []string{"-max-retries", "-3"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

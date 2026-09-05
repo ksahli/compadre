@@ -50,10 +50,11 @@ Early. What works today:
   cannot be written — which end the session, with the id printed so it is
   picked back up with `-exchange`
 - what the run is bounded by, on the command line: `-model` and `-max-tokens`
-  for the model to reach and how much of a reply it may write, `-workspace` for
-  the directory the file tools may see, and `-max-turns` for how many turns one
-  exchange may take — each optional, and each defaulting to the value that was
-  true before there was a flag
+  for the model to reach and how much of a reply it may write, `-max-retries`
+  for how many times a request the API turned away is sent again, `-workspace`
+  for the directory the file tools may see, and `-max-turns` for how many turns
+  one exchange may take — each optional, and each defaulting to the value that
+  was true before there was a flag
 - unit tests over the core packages, the anthropic adapter, the loop and the
   store
 
@@ -227,8 +228,12 @@ one in a row takes it — anything typed in between puts that away again.
 `invoke` takes.
 
 The model and the ceiling on one reply are `-model` and `-max-tokens`,
-defaulting to `claude-sonnet-5` and 1024 tokens; the directory the file tools
-may see is `-workspace`, defaulting to the one the command was run in. The
+defaulting to `claude-sonnet-5` and 1024 tokens; how many times a request the
+API turned away is sent again is `-max-retries`, defaulting to two, and the
+waiting between attempts — backing off, and honouring what the API's own
+`Retry-After` asked for — is the SDK's rather than this program's; the directory
+the file tools may see is `-workspace`, defaulting to the one the command was
+run in. The
 tools on offer are still fixed in the `invoke` command and are not reachable
 from the command line. An exchange is bounded at `-max-turns` turns, ten by
 default, so a model that keeps asking for tools is stopped rather than left to

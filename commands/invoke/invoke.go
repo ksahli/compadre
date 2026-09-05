@@ -7,18 +7,18 @@
 // [github.com/ksahli/compadre/internal/core/agents]'s work, not a command's.
 //
 // What is left here is the half that is genuinely a command's: choosing the
-// provider and the model it reaches with the ceiling on one reply, deciding
-// which tools are on offer and what root the file ones may see, saying where
-// the record goes, saying how many turns a run may take, deciding what drives
-// the turns, and printing.
+// provider and the model it reaches with the ceiling on one reply and the
+// retries it is worth, deciding which tools are on offer and what root the file
+// ones may see, saying where the record goes, saying how many turns a run may
+// take, deciding what drives the turns, and printing.
 //
-// Four of those are flags with a default rather than a fixed answer. -model
-// and -max-tokens are the adapter's to hold and are named at [anthropic.New];
-// -max-turns is the agent's and is named at [agents.New]; -workspace moves the
-// root the file tools are held inside off the directory the command was run
-// in. An absent one of any of them is not an absence but the value that was
-// true before there was a flag, which is why each default is a named constant
-// somewhere rather than a literal here. The agent keeps the record but hands the exchange back rather than
+// Five of those are flags with a default rather than a fixed answer. -model,
+// -max-tokens and -max-retries are the adapter's to hold and are named at
+// [anthropic.New]; -max-turns is the agent's and is named at [agents.New];
+// -workspace moves the root the file tools are held inside off the directory
+// the command was run in. An absent one of any of them is not an absence but
+// the value that was true before there was a flag, which is why each default is
+// a named constant somewhere rather than a literal here. The agent keeps the record but hands the exchange back rather than
 // showing it to anyone, so the words reach a reader only because this package
 // puts them there.
 //
@@ -118,10 +118,11 @@ const (
 // Command is a parsed invoke: the instructions to stand over the exchange, the
 // message to carry it on if there is one, the exchange to continue if there is
 // one, where to keep the record of it, what the run is bounded by — the model,
-// the ceiling on one reply, the directory the file tools may see and the
-// ceiling on the turns — and the three streams it is reached through.
+// the ceiling on one reply, the retries of a request the API turned away, the
+// directory the file tools may see and the ceiling on the turns — and the three
+// streams it is reached through.
 //
-// The four bounds are kept as the caller gave them, zero where they were not
+// The five bounds are kept as the caller gave them, zero where they were not
 // given, and the defaults are reached for at [Command.Execute] where the
 // things that own them are built. Filling them in here would put this
 // package's name on numbers that are not its to state.
@@ -137,6 +138,7 @@ type Command struct {
 
 	model     string
 	tokens    int64
+	retries   int
 	directory string
 	turns     int
 
@@ -185,7 +187,7 @@ func (c *Command) Execute(ctx Context) error {
 		web.New(),
 		files.NewList(root), files.NewRead(root), files.NewWrite(root),
 	)
-	agent := agents.New(anthropic.New(c.model, c.tokens), registry, store, c.turns)
+	agent := agents.New(anthropic.New(c.model, c.tokens, c.retries), registry, store, c.turns)
 
 	// The exchange comes back whether the run ended well or badly, so what
 	// was said is printed either way: a run that failed on its fourth turn
@@ -597,14 +599,15 @@ func workspace(directory string) (string, error) {
 // New parses the arguments invoke understands: -instructions for the system
 // instructions, -message for a single turn to send, -exchange for an exchange
 // to continue rather than open, -store for where to keep the record of it,
-// -model for the model to reach and -max-tokens for the ceiling on one reply
-// it may write, -workspace for the directory the file tools may see, and
+// -model for the model to reach, -max-tokens for the ceiling on one reply it
+// may write and -max-retries for how many times a request the API turned away
+// is sent again, -workspace for the directory the file tools may see, and
 // -max-turns for how many turns one exchange may take.
 //
 // An absent -store is not a run that keeps no record: it is a run that keeps
 // one where this program keeps them by default, and an absent -exchange is a
 // run that opens one rather than one that keeps nothing. The same holds for
-// the four bounds — an absent one of them is the value that was true before
+// the five bounds — an absent one of them is the value that was true before
 // there was a flag to say otherwise, which is why the zero value stands for
 // absence and the default is reached for at [Command.Execute]. An absent
 // -message is neither: it is a run that reads its turns from stdin instead of
@@ -617,7 +620,10 @@ func workspace(directory string) (string, error) {
 // nothing as a bound. It is refused rather than clamped for the reason an
 // unparseable flag is refused — a caller who typed it meant something, and
 // quietly running with a different number is the answer to a question nobody
-// asked. Zero is the absence above and is left alone.
+// asked. Zero is the absence above and is left alone, -max-retries included:
+// asking for no retries at all is a thing a caller might mean, but it is not a
+// thing this flag can say, because saying it would cost every bound here the
+// one rule they share about what an absent one is.
 //
 // The flag set writes into a buffer rather than to a stream of its own, for
 // the same reason. A request for help is one of the errors Parse can return,
@@ -638,6 +644,7 @@ func New(arguments []string) (*Command, error) {
 	f.StringVar(&c.store, "store", "", "where to keep the record of the exchange")
 	f.StringVar(&c.model, "model", "", "the model to reach, "+anthropic.Model+" if absent")
 	f.Int64Var(&c.tokens, "max-tokens", 0, fmt.Sprintf("ceiling on one reply, %d if absent", anthropic.Tokens))
+	f.IntVar(&c.retries, "max-retries", 0, fmt.Sprintf("retries of a request the API turned away, %d if absent", anthropic.Retries))
 	f.StringVar(&c.directory, "workspace", "", "the directory the file tools may see, the current one if absent")
 	f.IntVar(&c.turns, "max-turns", 0, fmt.Sprintf("ceiling on the turns in one exchange, %d if absent", agents.Turns))
 
@@ -653,6 +660,9 @@ func New(arguments []string) (*Command, error) {
 	}
 	if c.turns < 0 {
 		return nil, fmt.Errorf("-max-turns must be a positive number of turns, got %d", c.turns)
+	}
+	if c.retries < 0 {
+		return nil, fmt.Errorf("-max-retries must be a positive number of retries, got %d", c.retries)
 	}
 
 	c.in, c.out, c.errs = os.Stdin, os.Stdout, os.Stderr
