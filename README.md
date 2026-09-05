@@ -18,8 +18,8 @@ Early. What works today:
   — what was said, a tool the model asks for, and the answer to one
 - tool use end to end: an `agents` package in the core runs the exchange —
   whatever the model asks for is run and answered, and the exchange goes on
-  until it has nothing left to ask for; the `invoke` command gathers the
-  registry, hands it over, and prints what was said
+  until it has nothing left to ask for; the `invoke` and `interact` commands
+  gather the registry, hand it over, and print what was said
 - a `weather` tool over Open-Meteo, the first thing in the tree to implement
   the core's tool port, and reachable by the model
 - `list_files`, `read_file` and `write_file` tools over the directory the
@@ -34,14 +34,15 @@ Early. What works today:
 - picking one of those back up: `invoke -exchange <id>` reads the exchange out
   of the store and carries it on rather than opening a new one, and what it
   says goes down under the same id
-- a session: `invoke` with no `-message` reads turns from stdin a line at a
-  time and answers each in the exchange the last one grew — one process, one
-  id, no copying an id between runs
-- an interrupt in a session ends the turn and not the session: Ctrl-C while
+- two commands over the same wiring: `invoke` takes one turn with `-message`
+  and is done, and `interact` reads turns from stdin a line at a time and
+  answers each in the exchange the last one grew — one process, one id, no
+  copying an id between runs
+- an interrupt in `interact` ends the turn and not the session: Ctrl-C while
   the model is being waited on abandons that reply and asks again, with
   everything said so far still in the exchange. The way out is the end of the
   input, or two Ctrl-Cs in a row at the prompt
-- a turn that failed in a session ends the turn and not the session either:
+- a turn that failed in `interact` ends the turn and not the session either:
   what went wrong is said at the prompt and the next turn is asked for, so a
   rate limit, an overloaded API or a reply cut off at the ceiling costs a turn
   rather than a conversation. The exceptions are the failures nothing typed at
@@ -129,8 +130,9 @@ go run . invoke -message 'read internal/core/tools/tools.go and explain Invoke'
 go run . invoke -message 'write a hello.go that prints hello'
 ```
 
-Note the third: `invoke` can now change the directory it was run in. It can
-change nothing else. Paths are relative to that directory, and one leading
+Note the third: the model can now change the directory the command was run
+in. It can change nothing else. Paths are relative to that directory, and one
+leading
 outside is refused by name rather than quietly answered about — or written
 into — the root. `.git` is listed but never walked into, never read out of and
 never written to.
@@ -200,12 +202,12 @@ Finding an exchange is still a question for `sqlite3`; nothing on the command
 line lists them.
 
 Between the two — one message a run, and picking a run back up by its id —
-there is a third way to hold the same conversation. `invoke` with no `-message`
-reads turns from stdin instead, a line at a time, and answers each in the
-exchange the last one grew:
+there is a third way to hold the same conversation, and it is a command of its
+own. `interact` reads turns from stdin instead, a line at a time, and answers
+each in the exchange the last one grew:
 
 ```sh
-go run . invoke
+go run . interact
 > why is the sky blue?
 rayleigh scattering: shorter wavelengths are scattered more by the air
 > and at sunset?
@@ -214,12 +216,15 @@ the light travels further through the atmosphere, so more of the blue is gone
 # exchange 7 in /home/you/.config/compadre/exchanges.db
 ```
 
-It is the same loop `-exchange` runs across processes, with memory standing in
-for the store: the exchange never leaves, so nothing is read back and the id is
-minted once and printed at the end. A blank line is not a turn and asks again
-rather than spending a request. `-exchange` works here too, which makes a
-session something a previous run can be carried on in; `-instructions` is
-refused alongside it for the same reason as ever.
+It is the same loop `invoke -exchange` runs across processes, with memory
+standing in for the store: the exchange never leaves, so nothing is read back
+and the id is minted once and printed at the end. A blank line is not a turn
+and asks again rather than spending a request. `interact` takes every flag
+`invoke` does except `-message`, which it has no use for — including
+`-exchange`, so a session can carry on what a previous run left; and
+`-instructions` is refused alongside it for the same reason as ever.
+Symmetrically, `invoke` without a `-message` is refused at parsing rather than
+quietly turning into a prompt: a caller with nothing to say wants `interact`.
 
 The prompt goes to stderr, with the id line and for the same reason — it is the
 program talking about itself rather than the answer to what was asked. So a
@@ -227,7 +232,7 @@ session works down a pipe as well as under a person, and nothing has to ask
 which it is:
 
 ```sh
-echo 'why is the sky blue?' | go run . invoke > answer.txt
+echo 'why is the sky blue?' | go run . interact > answer.txt
 ```
 
 Ctrl-D ends a session that has said everything it had to say. A turn that
@@ -241,8 +246,8 @@ the next question carries on in the same exchange. At the prompt there is
 nothing in flight for it to spoil, so the first says how to leave and a second
 one in a row takes it — anything typed in between puts that away again.
 
-`compadre help` lists the commands, and `compadre invoke -h` the arguments
-`invoke` takes.
+`compadre help` lists the commands, and `compadre invoke -h` and
+`compadre interact -h` the arguments each takes.
 
 The model and the ceiling on one reply are `-model` and `-max-tokens`,
 defaulting to `claude-sonnet-5` and 1024 tokens; how many times a request the
@@ -250,19 +255,17 @@ API turned away is sent again is `-max-retries`, defaulting to two, and the
 waiting between attempts — backing off, and honouring what the API's own
 `Retry-After` asked for — is the SDK's rather than this program's; the directory
 the file tools may see is `-workspace`, defaulting to the one the command was
-run in. `-usage` says what each
-turn cost, in tokens read and tokens written, on stderr with everything else
-the program says about itself, so the answer can still be piped somewhere on
-its own; a turn the provider did not count is not reported as costing nothing.
-The
-tools on offer are still fixed in the `invoke` command and are not reachable
-from the command line. An exchange is bounded at `-max-turns` turns, ten by
-default, so a model that keeps asking for tools is stopped rather than left to
-spend. A reply the model stopped short
-of finishing — cut off at the token ceiling, declined, or out of context — is an
+run in. `-usage` says what each turn cost, in tokens read and tokens written,
+on stderr with everything else the program says about itself, so the answer
+can still be piped somewhere on its own; a turn the provider did not count is
+not reported as costing nothing. The tools on offer are still fixed in the two
+commands and are not reachable from the command line. An exchange is bounded
+at `-max-turns` turns, ten by default, so a model that keeps asking for tools
+is stopped rather than left to spend. A reply the model stopped short of
+finishing — cut off at the token ceiling, declined, or out of context — is an
 error rather than a half answer passed off as a whole one, and an interrupt
 cancels the request rather than killing the process mid-flight — the run itself
-when `-message` was the whole of it, the turn alone in a session.
+under `invoke`, the turn alone under `interact`.
 
 A request the API turns away is reported the same way: a key it will not
 accept, a model it does not know, an account it cannot bill, a rate limit, or

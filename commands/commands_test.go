@@ -12,8 +12,10 @@ func TestNew(t *testing.T) {
 		name      string
 		arguments []string
 	}{
-		{"invoke", []string{"invoke"}},
-		{"invoke with its own flags", []string{"invoke", "-message", "hello"}},
+		{"invoke", []string{"invoke", "-message", "hello"}},
+		{"invoke with more of its own flags", []string{"invoke", "-message", "hello", "-usage"}},
+		{"interact", []string{"interact"}},
+		{"interact with its own flags", []string{"interact", "-usage"}},
 		{"help", []string{"help"}},
 	}
 	for _, c := range cases {

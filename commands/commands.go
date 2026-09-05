@@ -10,15 +10,14 @@ import (
 	"fmt"
 
 	"github.com/ksahli/compadre/commands/help"
+	"github.com/ksahli/compadre/commands/interact"
 	"github.com/ksahli/compadre/commands/invoke"
 )
-
-type Context = context.Context
 
 // Command is one thing the binary can be asked to do, already parsed and
 // ready to run.
 type Command interface {
-	Execute(ctx Context) error
+	Execute(ctx context.Context) error
 }
 
 // New reads the command name off the front of the arguments and hands the
@@ -34,6 +33,8 @@ func New(arguments []string) (Command, error) {
 	switch name {
 	case "invoke":
 		return invoke.New(arguments[1:])
+	case "interact":
+		return interact.New(arguments[1:])
 	case "help":
 		return help.New(arguments[1:])
 	default:

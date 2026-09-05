@@ -46,5 +46,7 @@ func run(arguments []string, stderr io.Writer) int {
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stderr))
+	arguments := os.Args[1:]
+	code := run(arguments, os.Stderr)
+	os.Exit(code)
 }
