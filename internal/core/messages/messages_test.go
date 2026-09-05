@@ -7,6 +7,7 @@ import (
 	"github.com/ksahli/compadre/internal/core/roles"
 	"github.com/ksahli/compadre/internal/core/tools/results"
 	"github.com/ksahli/compadre/internal/core/tools/use"
+	"github.com/ksahli/compadre/internal/core/usage"
 )
 
 // block is what a content block is expected to answer, whichever shape it is.
@@ -238,6 +239,52 @@ func TestContentIsACopy(t *testing.T) {
 
 	said, ok := message.Content()[0].Text()
 	if !ok || said != "hi" {
+		t.Errorf("Content()[0].Text() = %q, %v, want %q, true", said, ok, "hi")
+	}
+}
+
+// A message built by New was never counted. Everything said to the model
+// rather than by it stays that way, and a reader has to be able to tell that
+// from a turn counted at nothing.
+func TestNewIsUncounted(t *testing.T) {
+	message := messages.New(roles.User, messages.Text("hi"))
+
+	if count := message.Usage(); count.Counted() {
+		t.Errorf("Usage() = %v, want a count nobody took", count)
+	}
+}
+
+// With is a successor: the message under a count, leaving the one it was made
+// from as it was. A count is arrived at after the turn was said, and saying it
+// again is not what happened.
+func TestWithIsASuccessor(t *testing.T) {
+	message := messages.New(roles.Assistant, messages.Text("hi"))
+
+	counted := message.With(usage.New(1204, 318))
+
+	if got := counted.Usage(); got != usage.New(1204, 318) {
+		t.Errorf("With(...).Usage() = %v, want 1204 in and 318 out", got)
+	}
+	if message.Usage().Counted() {
+		t.Error("With counted the message it was called on, and it is a value")
+	}
+	if said, ok := counted.Content()[0].Text(); !ok || said != "hi" {
+		t.Errorf("With(...).Content()[0].Text() = %q, %v, want %q, true", said, ok, "hi")
+	}
+	if counted.Role() != roles.Assistant {
+		t.Errorf("With(...).Role() = %q, want %q", counted.Role(), roles.Assistant)
+	}
+}
+
+// The successor does not share the content slice with the message it came
+// from, so scribbling on what one returns cannot reach the other.
+func TestWithCopiesTheContent(t *testing.T) {
+	message := messages.New(roles.Assistant, messages.Text("hi"))
+	counted := message.With(usage.New(1, 2))
+
+	message.Content()[0] = messages.Text("tampered")
+
+	if said, ok := counted.Content()[0].Text(); !ok || said != "hi" {
 		t.Errorf("Content()[0].Text() = %q, %v, want %q, true", said, ok, "hi")
 	}
 }

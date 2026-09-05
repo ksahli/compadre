@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -101,6 +102,16 @@ func stopped(reason string, blocks ...string) string {
 		`"model":"claude-sonnet-5","content":[` + strings.Join(blocks, ",") + `],` +
 		`"stop_reason":"` + reason + `","stop_sequence":null,` +
 		`"usage":{"input_tokens":1,"output_tokens":2}}`
+}
+
+// metered is a whole response counted at the given numbers, for the cases
+// where what the turn cost is the thing under test rather than a constant the
+// envelope carries.
+func metered(input, output int, blocks ...string) string {
+	return `{"id":"msg_1","type":"message","role":"assistant",` +
+		`"model":"claude-sonnet-5","content":[` + strings.Join(blocks, ",") + `],` +
+		`"stop_reason":"end_turn","stop_sequence":null,` +
+		fmt.Sprintf(`"usage":{"input_tokens":%d,"output_tokens":%d}}`, input, output)
 }
 
 // options point the adapter at a test server instead of the real API. This is
@@ -841,6 +852,70 @@ func TestInvoke(t *testing.T) {
 			}
 			if *calls != 1 {
 				t.Errorf("server was asked %d times, want 1", *calls)
+			}
+		})
+	}
+}
+
+// TestInvokeCarriesWhatTheTurnCost pins the count coming off the response and
+// onto the message it was taken for. A response is one turn, so what the round
+// trip was metered at is what that turn cost, and it rides back with it.
+func TestInvokeCarriesWhatTheTurnCost(t *testing.T) {
+	cases := []struct {
+		name   string
+		body   string
+		input  int64
+		output int64
+	}{
+		{
+			name:   "what the envelope said",
+			body:   reply(text("hola")),
+			input:  1,
+			output: 2,
+		},
+		{
+			name:   "a turn that cost a lot to read",
+			body:   metered(1204, 318, text("hola")),
+			input:  1204,
+			output: 318,
+		},
+		{
+			// A count of zero is still a count somebody took, and
+			// has to arrive as one rather than as no count at all.
+			name:   "a turn the API counted at nothing",
+			body:   metered(0, 0, text("hola")),
+			input:  0,
+			output: 0,
+		},
+		{
+			// The count belongs to the turn and not to a block, so
+			// a turn made of several blocks carries the one count.
+			name:   "several blocks, one count",
+			body:   metered(9, 4, text("a"), toolUse, text("b")),
+			input:  9,
+			output: 4,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, _, options := stub(t, c.body)
+
+			thread := threads.New("", messages.New(roles.User, messages.Text("hello")))
+			replies, err := anthropic.New("", 0, 0, options...).Invoke(context.Background(), thread, nil)
+			if err != nil {
+				t.Fatalf("Invoke() error = %v, want nil", err)
+			}
+			if len(replies) != 1 {
+				t.Fatalf("replies = %d, want 1", len(replies))
+			}
+
+			count := replies[0].Usage()
+			if !count.Counted() {
+				t.Fatal("the reply came back uncounted, and the response said what it cost")
+			}
+			if count.Input() != c.input || count.Output() != c.output {
+				t.Errorf("the turn cost %d in and %d out, want %d and %d",
+					count.Input(), count.Output(), c.input, c.output)
 			}
 		})
 	}

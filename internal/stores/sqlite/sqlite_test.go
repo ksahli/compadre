@@ -15,6 +15,7 @@ import (
 	"github.com/ksahli/compadre/internal/core/threads"
 	"github.com/ksahli/compadre/internal/core/tools"
 	"github.com/ksahli/compadre/internal/core/tools/use"
+	"github.com/ksahli/compadre/internal/core/usage"
 	"github.com/ksahli/compadre/internal/stores/sqlite"
 )
 
@@ -355,5 +356,73 @@ func TestLoadOfATurnTakenByNobody(t *testing.T) {
 
 	if _, err := store.Load(ctx, saved.ID()); !errors.Is(err, roles.ErrUnknown) {
 		t.Errorf("Load() error = %v, want %v", err, roles.ErrUnknown)
+	}
+}
+
+// TestSaveAndLoadKeepsWhatTheTurnCost is the round trip for the counts. The
+// model's turns carry one and the caller's do not, and both facts have to come
+// back as they went in: a turn nobody counted must not read back as one
+// counted at nothing.
+func TestSaveAndLoadKeepsWhatTheTurnCost(t *testing.T) {
+	store := open(t)
+
+	thread := threads.New("",
+		messages.New(roles.User, messages.Text("why is the sky blue?")),
+		messages.New(roles.Assistant, messages.Text("rayleigh scattering")).With(usage.New(1204, 318)),
+		messages.New(roles.User, messages.Text("and at sunset?")),
+		messages.New(roles.Assistant, messages.Text("the same, longer through it")).With(usage.New(0, 0)),
+	)
+
+	saved, err := store.Save(context.Background(), exchanges.Open(thread))
+	if err != nil {
+		t.Fatalf("Save() error = %v, want nil", err)
+	}
+
+	loaded, err := store.Load(context.Background(), saved.ID())
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+
+	want := []usage.Type{{}, usage.New(1204, 318), {}, usage.New(0, 0)}
+	got := loaded.Thread().Messages()
+	if len(got) != len(want) {
+		t.Fatalf("loaded %d turns, want %d", len(got), len(want))
+	}
+	for at, count := range want {
+		if got[at].Usage() != count {
+			t.Errorf("turn %d cost %v, want %v", at, got[at].Usage(), count)
+		}
+	}
+}
+
+// The counts belong to the turn rather than to a block, so a turn made of
+// several blocks reads back carrying one count and not the last row's.
+func TestLoadCountsATurnOnce(t *testing.T) {
+	store := open(t)
+
+	turn := messages.New(roles.Assistant,
+		messages.Text("looking"),
+		messages.Use(use.New("toolu_1", "read_file", use.Arguments(`{"path":"go.mod"}`))),
+	).With(usage.New(9, 4))
+
+	saved, err := store.Save(context.Background(), exchanges.Open(threads.New("", turn)))
+	if err != nil {
+		t.Fatalf("Save() error = %v, want nil", err)
+	}
+
+	loaded, err := store.Load(context.Background(), saved.ID())
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+
+	got := loaded.Thread().Messages()
+	if len(got) != 1 {
+		t.Fatalf("loaded %d turns, want 1", len(got))
+	}
+	if got[0].Usage() != usage.New(9, 4) {
+		t.Errorf("the turn cost %v, want 9 in and 4 out", got[0].Usage())
+	}
+	if len(got[0].Content()) != 2 {
+		t.Errorf("the turn said %d blocks, want 2", len(got[0].Content()))
 	}
 }

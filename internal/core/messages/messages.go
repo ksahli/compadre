@@ -6,6 +6,7 @@ import (
 	"github.com/ksahli/compadre/internal/core/roles"
 	"github.com/ksahli/compadre/internal/core/tools/results"
 	"github.com/ksahli/compadre/internal/core/tools/use"
+	"github.com/ksahli/compadre/internal/core/usage"
 )
 
 // Content is one piece of what a message says: something said, a tool the
@@ -65,17 +66,27 @@ func Result(answer results.Type) Content {
 	return toolResult{result: answer}
 }
 
-// Type is a message: the part it takes in the exchange, and what it says.
-// What it says is a list rather than a value, because one turn is often
-// several things at once — a sentence and the tool call it leads to, or every
-// result a round of calls produced.
+// Type is a message: the part it takes in the exchange, and what it says, and
+// what it cost. What it says is a list rather than a value, because one turn is
+// often several things at once — a sentence and the tool call it leads to, or
+// every result a round of calls produced.
 type Type struct {
 	role    roles.Type
 	content []Content
+	usage   usage.Type
 }
 
 func (message Type) Role() roles.Type {
 	return message.role
+}
+
+// Usage is what the turn cost, where anybody counted it. A turn said to the
+// model rather than by it was never metered and carries the zero count, which
+// reports [github.com/ksahli/compadre/internal/core/usage.Type.Counted] false —
+// so does a turn from a provider that does not account for itself. Reading the
+// numbers without asking that first is reading a zero nobody measured.
+func (message Type) Usage() usage.Type {
+	return message.usage
 }
 
 // Content is what the message says, in order. The slice is the caller's to
@@ -95,5 +106,20 @@ func New(role roles.Type, content ...Content) Type {
 		role:    role,
 		content: slices.Clone(content),
 	}
+	return message
+}
+
+// With is the message under a count, and is how a provider that meters its
+// turns says what one cost. It returns a successor rather than changing this
+// one: a message is a value and what was said does not become something else
+// because it was later added up. The content is copied again, so the two do
+// not share a slice.
+//
+// It is on the message rather than a parameter of [New] because counting is
+// the exception. Every turn has a part to take and something to say; only the
+// ones a model wrote come back with a price on them.
+func (message Type) With(count usage.Type) Type {
+	message.content = slices.Clone(message.content)
+	message.usage = count
 	return message
 }

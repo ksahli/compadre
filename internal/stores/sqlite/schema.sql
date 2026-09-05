@@ -19,11 +19,17 @@ CREATE TABLE IF NOT EXISTS threads (
 -- ordinal is the turn's place in the exchange, and the UNIQUE over it is what
 -- makes reading the thread back in the order it was said a matter of the
 -- schema rather than of hoping rowids stay put.
+--
+-- The two counts are what the turn cost, and they are null together: null is
+-- nobody counted this turn, which is what every turn said to the model rather
+-- than by it looks like, and is a different fact from a turn counted at zero.
 CREATE TABLE IF NOT EXISTS messages (
-    id      INTEGER PRIMARY KEY,
-    thread  INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-    ordinal INTEGER NOT NULL,
-    role    TEXT NOT NULL,
+    id            INTEGER PRIMARY KEY,
+    thread        INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+    ordinal       INTEGER NOT NULL,
+    role          TEXT NOT NULL,
+    input_tokens  INTEGER,  -- tokens the turn was read from, null if uncounted
+    output_tokens INTEGER,  -- tokens the turn was written in, null if uncounted
     UNIQUE (thread, ordinal)
 ) STRICT;
 

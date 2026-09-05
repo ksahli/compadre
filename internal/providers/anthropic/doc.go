@@ -7,9 +7,9 @@
 // become the system prompt, which is where this API wants them. Inbound,
 // each of the response's content blocks becomes an assistant message: text
 // as itself, a tool call as the argument JSON the model sent, which holds
-// the call until the port carries tool use as something other than text.
-// Everything the port has no shape for — usage among it — is dropped on the
-// way through.
+// the call until the port carries tool use as something other than text, and
+// what the round trip was metered at as the count on that message. Everything
+// the port has no shape for is dropped on the way through.
 //
 // The model's own reasoning is among what is dropped, and deliberately. No
 // thinking parameter is sent, which on the models this adapter reaches is what

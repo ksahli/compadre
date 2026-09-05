@@ -16,6 +16,7 @@ import (
 	"github.com/ksahli/compadre/internal/core/threads"
 	"github.com/ksahli/compadre/internal/core/tools/results"
 	"github.com/ksahli/compadre/internal/core/tools/use"
+	"github.com/ksahli/compadre/internal/core/usage"
 
 	_ "modernc.org/sqlite"
 )
@@ -158,11 +159,19 @@ func open(ctx Context, tx *sql.Tx, exchange Exchange) (int64, int, error) {
 	return id, written, nil
 }
 
-// write puts one turn and everything it says into the record.
+// write puts one turn and everything it says into the record, and what it
+// cost. A turn nobody counted is written with both counts null rather than
+// with zeroes, so that reading it back says nobody counted it.
 func write(ctx Context, tx *sql.Tx, thread int64, ordinal int, message Message) error {
+	var input, output any
+	if count := message.Usage(); count.Counted() {
+		input, output = count.Input(), count.Output()
+	}
+
 	row, err := tx.ExecContext(ctx,
-		`INSERT INTO messages (thread, ordinal, role) VALUES (?, ?, ?)`,
-		thread, ordinal, message.Role().String())
+		`INSERT INTO messages (thread, ordinal, role, input_tokens, output_tokens)
+		 VALUES (?, ?, ?, ?, ?)`,
+		thread, ordinal, message.Role().String(), input, output)
 	if err != nil {
 		return fmt.Errorf("could not write turn %d of the exchange: %w", ordinal, err)
 	}
@@ -248,7 +257,8 @@ func (s *Store) Load(ctx Context, id string) (Exchange, error) {
 // walk below only has to notice when the turn changes.
 func read(ctx Context, db *sql.DB, thread int64) ([]Message, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT m.id, m.role, c.kind, c.text, c.call, c.tool, c.arguments, c.content, c.failed
+		SELECT m.id, m.role, m.input_tokens, m.output_tokens,
+		       c.kind, c.text, c.call, c.tool, c.arguments, c.content, c.failed
 		  FROM messages m
 		  LEFT JOIN contents c ON c.message = m.id
 		 WHERE m.thread = ?
@@ -261,11 +271,14 @@ func read(ctx Context, db *sql.DB, thread int64) ([]Message, error) {
 	conversation, content := []Message{}, []Content{}
 	var current int64
 	var role string
+	var count usage.Type
 
 	for rows.Next() {
 		var (
 			message   int64
 			said      string
+			input     sql.NullInt64
+			output    sql.NullInt64
 			kind      sql.NullString
 			text      sql.NullString
 			call      sql.NullString
@@ -274,19 +287,23 @@ func read(ctx Context, db *sql.DB, thread int64) ([]Message, error) {
 			answer    sql.NullString
 			failed    sql.NullBool
 		)
-		if err := rows.Scan(&message, &said, &kind, &text, &call, &tool, &arguments, &answer, &failed); err != nil {
+		if err := rows.Scan(&message, &said, &input, &output,
+			&kind, &text, &call, &tool, &arguments, &answer, &failed); err != nil {
 			return nil, err
 		}
 
 		if current != 0 && message != current {
-			turn, err := taken(role, content)
+			turn, err := taken(role, count, content)
 			if err != nil {
 				return nil, err
 			}
 			conversation = append(conversation, turn)
 			content = []Content{}
 		}
-		current, role = message, said
+		// The counts belong to the turn rather than to the block, so
+		// they are read where the turn is, alongside the role, and the
+		// rows of one turn all carry the same pair.
+		current, role, count = message, said, counted(input, output)
 
 		// A turn that says nothing has one row with no block on it,
 		// which the left join is there to keep rather than drop.
@@ -306,7 +323,7 @@ func read(ctx Context, db *sql.DB, thread int64) ([]Message, error) {
 	}
 
 	if current != 0 {
-		turn, err := taken(role, content)
+		turn, err := taken(role, count, content)
 		if err != nil {
 			return nil, err
 		}
@@ -316,17 +333,27 @@ func read(ctx Context, db *sql.DB, thread int64) ([]Message, error) {
 	return conversation, nil
 }
 
-// taken rebuilds one turn from the role it was filed under and the blocks
-// read back for it. The role is a word on the way in and a value on the way
+// taken rebuilds one turn from the role it was filed under, what it cost, and
+// the blocks read back for it. The role is a word on the way in and a value on the way
 // out, and this is where it crosses: a row filed under a word the core has no
 // role for is refused here, at the edge it came in by, rather than carried on
 // as a turn no provider can place.
-func taken(role string, content []Content) (Message, error) {
+func taken(role string, count usage.Type, content []Content) (Message, error) {
 	part, err := roles.Parse(role)
 	if err != nil {
 		return Message{}, fmt.Errorf("could not read a turn of the exchange: %w", err)
 	}
-	return messages.New(part, content...), nil
+	return messages.New(part, content...).With(count), nil
+}
+
+// counted turns the two columns back into what the turn cost. They are written
+// null together and read null together: either is absent and nobody counted the
+// turn, which is the zero count rather than a count of nothing.
+func counted(input, output sql.NullInt64) usage.Type {
+	if !input.Valid || !output.Valid {
+		return usage.Type{}
+	}
+	return usage.New(input.Int64, output.Int64)
 }
 
 // block turns one row back into the content it was written from.

@@ -54,7 +54,15 @@ Early. What works today:
   for how many times a request the API turned away is sent again, `-workspace`
   for the directory the file tools may see, and `-max-turns` for how many turns
   one exchange may take — each optional, and each defaulting to the value that
-  was true before there was a flag
+  was true before there was a flag; and `-usage`, which is not a bound but a
+  question of what is said
+- what each turn cost, in tokens read and tokens written: the adapter reads the
+  count off the response and it rides on the message it belongs to, is written
+  down with it, and is said at the terminal when `-usage` asks for it. Only the
+  model's turns carry one; a turn nobody counted says nothing rather than zero.
+  This adds two columns to the `messages` table and there is no migration
+  machinery, so a record written before this change has to be deleted before it
+  can be read or added to again
 - unit tests over the core packages, the anthropic adapter, the loop and the
   store
 
@@ -160,6 +168,15 @@ sqlite3 ~/.config/compadre/exchanges.db \
   "SELECT tool, count(*) FROM contents WHERE kind = 'use' GROUP BY tool"
 ```
 
+What each turn cost is written down with it, so what an exchange cost is a
+question the record can answer too. The counts are null on every turn nobody
+metered — everything said to the model rather than by it:
+
+```sh
+sqlite3 ~/.config/compadre/exchanges.db \
+  "SELECT sum(output_tokens) FROM messages WHERE thread = 7"
+```
+
 That id is also how an exchange is picked back up:
 
 ```sh
@@ -233,7 +250,11 @@ API turned away is sent again is `-max-retries`, defaulting to two, and the
 waiting between attempts — backing off, and honouring what the API's own
 `Retry-After` asked for — is the SDK's rather than this program's; the directory
 the file tools may see is `-workspace`, defaulting to the one the command was
-run in. The
+run in. `-usage` says what each
+turn cost, in tokens read and tokens written, on stderr with everything else
+the program says about itself, so the answer can still be piped somewhere on
+its own; a turn the provider did not count is not reported as costing nothing.
+The
 tools on offer are still fixed in the `invoke` command and are not reachable
 from the command line. An exchange is bounded at `-max-turns` turns, ten by
 default, so a model that keeps asking for tools is stopped rather than left to

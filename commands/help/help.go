@@ -30,6 +30,10 @@ again, -workspace for the directory the file tools may see, and -max-turns for
 how many turns one exchange may take. An absent one of those is the value that
 was true before there was a flag to say otherwise.
 
+-usage says what each turn cost, in tokens read and tokens written. It goes to
+stderr with everything else the program says about itself, so the answer can
+still be piped somewhere on its own.
+
 Run compadre invoke -h for the arguments invoke understands, and the defaults
 they stand in for.
 

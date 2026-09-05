@@ -60,8 +60,9 @@
 // The two streams say different things. What the model said goes to stdout,
 // and only that, so a caller can pipe the answer somewhere without picking it
 // out of anything else. Where the exchange was filed goes to stderr, and so
-// does the prompt a session writes, because both are this program talking
-// about itself rather than the answer to what was asked. That is what lets a
+// does the prompt a session writes, and so does what a turn cost when -usage
+// asks for it, because all three are this program talking about itself rather
+// than the answer to what was asked. That is what lets a
 // session be driven by a pipe as well as by a person, with no test for which
 // it is: the prompts go where the answer is not.
 package invoke
@@ -119,13 +120,18 @@ const (
 // message to carry it on if there is one, the exchange to continue if there is
 // one, where to keep the record of it, what the run is bounded by — the model,
 // the ceiling on one reply, the retries of a request the API turned away, the
-// directory the file tools may see and the ceiling on the turns — and the three
-// streams it is reached through.
+// directory the file tools may see and the ceiling on the turns — whether what
+// each turn cost is to be said, and the three streams it is reached through.
 //
 // The five bounds are kept as the caller gave them, zero where they were not
 // given, and the defaults are reached for at [Command.Execute] where the
 // things that own them are built. Filling them in here would put this
 // package's name on numbers that are not its to state.
+//
+// Whether the counts are said sits with the streams rather than with the
+// bounds. It is not something the run is held to; it is a question about what
+// this program says about itself, which is the same question the streams
+// answer.
 //
 // The streams are fields rather than named where they are used so that a
 // session can be driven by a test without a terminal at one end of it or an
@@ -141,6 +147,8 @@ type Command struct {
 	retries   int
 	directory string
 	turns     int
+
+	usage bool
 
 	in   io.Reader
 	out  io.Writer
@@ -343,7 +351,7 @@ func (c *Command) session(ctx Context, agent Agent, exchange Exchange, interrupt
 func (c *Command) converse(ctx Context, agent Agent, exchange Exchange) (Exchange, error) {
 	said := len(exchange.Thread().Messages())
 	finished, err := agent.Converse(ctx, exchange)
-	transcribe(c.out, finished.Thread(), said)
+	transcribe(c.out, c.errs, finished.Thread(), said, c.usage)
 	return finished, err
 }
 
@@ -539,7 +547,13 @@ func read(ctx Context, turns <-chan turn, interrupts <-chan os.Signal) (turn, he
 // conversation to be read back to them, so what was already there is skipped.
 // A thread only ever grows, so from is never past the end; it is clamped
 // anyway, because it arrives from outside rather than being counted here.
-func transcribe(out io.Writer, thread threads.Type, from int) {
+//
+// What a turn cost is said only when the caller asked for it, and never on the
+// stream the answer is on: it is this program accounting for the run rather
+// than something the model said, so it goes where the prompt and the exchange
+// id go. A turn nobody counted says nothing, which is not the same as a turn
+// counted at nothing.
+func transcribe(out, errs io.Writer, thread threads.Type, from int, counts bool) {
 	conversation := thread.Messages()
 	if from > len(conversation) {
 		from = len(conversation)
@@ -553,6 +567,10 @@ func transcribe(out io.Writer, thread threads.Type, from int) {
 			if text, ok := content.Text(); ok {
 				fmt.Fprintln(out, text)
 			}
+		}
+
+		if count := message.Usage(); counts && count.Counted() {
+			fmt.Fprintf(errs, "tokens: %d in, %d out\n", count.Input(), count.Output())
 		}
 	}
 }
@@ -647,6 +665,7 @@ func New(arguments []string) (*Command, error) {
 	f.IntVar(&c.retries, "max-retries", 0, fmt.Sprintf("retries of a request the API turned away, %d if absent", anthropic.Retries))
 	f.StringVar(&c.directory, "workspace", "", "the directory the file tools may see, the current one if absent")
 	f.IntVar(&c.turns, "max-turns", 0, fmt.Sprintf("ceiling on the turns in one exchange, %d if absent", agents.Turns))
+	f.BoolVar(&c.usage, "usage", false, "say what each turn of the exchange cost, in tokens")
 
 	if err := f.Parse(arguments); err != nil {
 		if errors.Is(err, flag.ErrHelp) {

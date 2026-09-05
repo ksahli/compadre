@@ -15,6 +15,7 @@ import (
 	"github.com/ksahli/compadre/internal/core/threads"
 	"github.com/ksahli/compadre/internal/core/tools"
 	"github.com/ksahli/compadre/internal/core/tools/use"
+	"github.com/ksahli/compadre/internal/core/usage"
 
 	sdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -252,7 +253,8 @@ type provider struct {
 }
 
 // reply turns the response's content blocks into one assistant message
-// carrying all of them, in the order they arrived. Text arrives as itself; a
+// carrying all of them, in the order they arrived, and what the round trip
+// cost. Text arrives as itself; a
 // tool call arrives whole — id, name and the arguments as the model sent
 // them, which is what pairs the answer with the call later; and so does the
 // reasoning that led to either. A block this mapping has no shape for is
@@ -260,6 +262,16 @@ type provider struct {
 // says nothing and cannot be sent back, and a response with nothing left after
 // that is no message at all — which [provider.Invoke] reports as an error,
 // since it is the one holding an error return.
+//
+// The count comes back on the message because the response and the message
+// are one to one: everything one round trip said becomes one turn, so what
+// that round trip was metered at is what that turn cost. Two things about the
+// number are worth knowing where it is read rather than where it is printed.
+// The input is the whole thread this request carried, not this turn's share of
+// it, so the counts of a conversation are a series and not addends. And the
+// SDK retries a request the API turned away — see [New] — so a turn that took
+// three attempts reports what the one that answered was metered at, and the
+// tokens the refused ones were read from are not accounted for anywhere.
 //
 // The model's own reasoning is among what is skipped. It arrives — no thinking
 // parameter is sent, which on the models this adapter reaches is what leaves
@@ -290,7 +302,9 @@ func reply(response *sdk.Message) []messages.Type {
 	if len(content) == 0 {
 		return []messages.Type{}
 	}
-	return []messages.Type{messages.New(roles.Assistant, content...)}
+
+	count := usage.New(response.Usage.InputTokens, response.Usage.OutputTokens)
+	return []messages.Type{messages.New(roles.Assistant, content...).With(count)}
 }
 
 // refused reports why a response is not an answer, or nil where it is one.

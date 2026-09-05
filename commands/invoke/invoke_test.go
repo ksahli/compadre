@@ -27,6 +27,7 @@ import (
 	"github.com/ksahli/compadre/internal/core/threads"
 	"github.com/ksahli/compadre/internal/core/tools"
 	"github.com/ksahli/compadre/internal/core/tools/use"
+	"github.com/ksahli/compadre/internal/core/usage"
 )
 
 func TestNew(t *testing.T) {
@@ -42,6 +43,7 @@ func TestNew(t *testing.T) {
 		retries      int
 		directory    string
 		turns        int
+		usage        bool
 	}{
 		{
 			// Every bound left at its zero value, which is how an
@@ -144,6 +146,14 @@ func TestNew(t *testing.T) {
 			directory:    "/tmp",
 			turns:        25,
 		},
+		{
+			// Not a bound: a question of what is said about the
+			// run, and off unless it is asked for.
+			name:      "what each turn cost, asked for",
+			arguments: []string{"-usage", "-message", "hello"},
+			input:     "hello",
+			usage:     true,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -181,6 +191,9 @@ func TestNew(t *testing.T) {
 			if command.turns != c.turns {
 				t.Errorf("turns = %d, want %d", command.turns, c.turns)
 			}
+			if command.usage != c.usage {
+				t.Errorf("usage = %v, want %v", command.usage, c.usage)
+			}
 		})
 	}
 }
@@ -198,7 +211,7 @@ func TestNewReportsHelpAsItsUsage(t *testing.T) {
 			if command != nil {
 				t.Errorf("New() = %v, want nil on error", command)
 			}
-			for _, want := range []string{"-instructions", "-message", "-exchange", "-store", "-model", "-max-tokens", "-max-retries", "-workspace", "-max-turns"} {
+			for _, want := range []string{"-instructions", "-message", "-exchange", "-store", "-model", "-max-tokens", "-max-retries", "-workspace", "-max-turns", "-usage"} {
 				if got := err.Error(); !strings.Contains(got, want) {
 					t.Errorf("New() error = %q, want it to name %q", got, want)
 				}
@@ -402,8 +415,8 @@ func TestTranscribe(t *testing.T) {
 		messages.New(roles.Assistant, messages.Text("hola")),
 	)
 
-	out := &strings.Builder{}
-	transcribe(out, thread, 0)
+	out, errs := &strings.Builder{}, &strings.Builder{}
+	transcribe(out, errs, thread, 0, false)
 
 	if got, want := out.String(), "let me look\nhola\n"; got != want {
 		t.Errorf("transcribe() printed %q, want %q", got, want)
@@ -438,13 +451,89 @@ func TestTranscribeAnExchangeWithNothingSaid(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			out := &strings.Builder{}
-			transcribe(out, c.thread, 0)
+			out, errs := &strings.Builder{}, &strings.Builder{}
+			transcribe(out, errs, c.thread, 0, true)
 
+			if got := errs.String(); got != "" {
+				t.Errorf("transcribe() said %q about the run, want nothing", got)
+			}
 			if got := out.String(); got != "" {
 				t.Errorf("transcribe() printed %q, want nothing", got)
 			}
 		})
+	}
+}
+
+// TestTranscribeSaysWhatTheTurnCost pins the count and the stream it goes on.
+// It is this program accounting for the run rather than something the model
+// said, so it belongs where the prompt and the exchange id go — which is what
+// lets the answer still be piped somewhere on its own.
+func TestTranscribeSaysWhatTheTurnCost(t *testing.T) {
+	thread := threads.New("",
+		messages.New(roles.User, messages.Text("hello")),
+		messages.New(roles.Assistant, messages.Text("hola")).With(usage.New(1204, 318)),
+	)
+
+	out, errs := &strings.Builder{}, &strings.Builder{}
+	transcribe(out, errs, thread, 0, true)
+
+	if got, want := out.String(), "hola\n"; got != want {
+		t.Errorf("transcribe() printed %q, want %q", got, want)
+	}
+	if got, want := errs.String(), "tokens: 1204 in, 318 out\n"; got != want {
+		t.Errorf("transcribe() said %q about the run, want %q", got, want)
+	}
+}
+
+// TestTranscribeIsQuietAboutTheCount pins the two ways a count goes unsaid: a
+// caller who did not ask for one, and a turn nobody counted. The second is the
+// one worth having — a turn measured at nothing and a turn nobody measured are
+// different facts, and reporting the second as "0 in, 0 out" would state a
+// number nobody took.
+func TestTranscribeIsQuietAboutTheCount(t *testing.T) {
+	cases := []struct {
+		name   string
+		thread threads.Type
+		counts bool
+	}{
+		{
+			name: "a count nobody asked for",
+			thread: threads.New("",
+				messages.New(roles.Assistant, messages.Text("hola")).With(usage.New(1204, 318))),
+			counts: false,
+		},
+		{
+			name: "a turn nobody counted",
+			thread: threads.New("",
+				messages.New(roles.Assistant, messages.Text("hola"))),
+			counts: true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out, errs := &strings.Builder{}, &strings.Builder{}
+			transcribe(out, errs, c.thread, 0, c.counts)
+
+			if got, want := out.String(), "hola\n"; got != want {
+				t.Errorf("transcribe() printed %q, want %q", got, want)
+			}
+			if got := errs.String(); got != "" {
+				t.Errorf("transcribe() said %q about the run, want nothing", got)
+			}
+		})
+	}
+}
+
+// A turn counted at nothing is a turn somebody counted, and is said.
+func TestTranscribeSaysACountOfNothing(t *testing.T) {
+	thread := threads.New("",
+		messages.New(roles.Assistant, messages.Text("hola")).With(usage.New(0, 0)))
+
+	out, errs := &strings.Builder{}, &strings.Builder{}
+	transcribe(out, errs, thread, 0, true)
+
+	if got, want := errs.String(), "tokens: 0 in, 0 out\n"; got != want {
+		t.Errorf("transcribe() said %q about the run, want %q", got, want)
 	}
 }
 
@@ -478,9 +567,12 @@ func TestTranscribeFromWhereTheRunBegan(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			out := &strings.Builder{}
-			transcribe(out, thread, c.from)
+			out, errs := &strings.Builder{}, &strings.Builder{}
+			transcribe(out, errs, thread, c.from, false)
 
+			if got := errs.String(); got != "" {
+				t.Errorf("transcribe() said %q about the run, want nothing", got)
+			}
 			if got := out.String(); got != c.want {
 				t.Errorf("transcribe() printed %q, want %q", got, c.want)
 			}
@@ -657,6 +749,18 @@ func answers(said ...string) *model {
 	return &model{replies: replies}
 }
 
+// counted is [answers] with a price on every turn, for the cases where what a
+// turn cost is the thing under test.
+func counted(input, output int64, said ...string) *model {
+	provider := answers(said...)
+	for turn, reply := range provider.replies {
+		for at, message := range reply {
+			provider.replies[turn][at] = message.With(usage.New(input, output))
+		}
+	}
+	return provider
+}
+
 // recorder stands in for a store. It files the first exchange it sees under an
 // id of its own, so that carrying one id across a whole session can be pinned,
 // and counts its writes so that a case can say the record was kept as the
@@ -756,6 +860,49 @@ func TestSessionKeepsTheStreamsApart(t *testing.T) {
 	}
 	// One prompt before the turn and one before the read that finds the
 	// end: a session asks again until it is told there is nothing more.
+	if got, want := errs.String(), prompt+prompt; got != want {
+		t.Errorf("session() printed %q to stderr, want %q", got, want)
+	}
+}
+
+// TestSessionSaysWhatEachTurnCost pins the count over a whole session: one
+// line per turn the model took, on the stream this program talks about itself
+// on, with the answer left alone on the other one. The prompts and the counts
+// interleave because that is the order they happened in.
+func TestSessionSaysWhatEachTurnCost(t *testing.T) {
+	command, out, errs := session("why is the sky blue?\nand at sunset?\n")
+	command.usage = true
+	provider := counted(1204, 318, "rayleigh scattering", "the light travels further")
+	agent := agents.New(provider, definitions.New(), &recorder{id: "7"}, agents.Turns)
+
+	if _, err := command.session(context.Background(), agent, exchanges.Open(threads.New("")), nil); err != nil {
+		t.Fatalf("session() error = %v, want nil", err)
+	}
+
+	if got, want := out.String(), "rayleigh scattering\nthe light travels further\n"; got != want {
+		t.Errorf("session() printed %q to stdout, want %q", got, want)
+	}
+
+	count := "tokens: 1204 in, 318 out\n"
+	if got, want := errs.String(), prompt+count+prompt+count+prompt; got != want {
+		t.Errorf("session() printed %q to stderr, want %q", got, want)
+	}
+}
+
+// And a session that was not asked for the counts says nothing about them,
+// even though the provider counted every turn.
+func TestSessionIsQuietAboutTheCountUnasked(t *testing.T) {
+	command, out, errs := session("why is the sky blue?\n")
+	provider := counted(1204, 318, "rayleigh scattering")
+	agent := agents.New(provider, definitions.New(), &recorder{id: "7"}, agents.Turns)
+
+	if _, err := command.session(context.Background(), agent, exchanges.Open(threads.New("")), nil); err != nil {
+		t.Fatalf("session() error = %v, want nil", err)
+	}
+
+	if got, want := out.String(), "rayleigh scattering\n"; got != want {
+		t.Errorf("session() printed %q to stdout, want %q", got, want)
+	}
 	if got, want := errs.String(), prompt+prompt; got != want {
 		t.Errorf("session() printed %q to stderr, want %q", got, want)
 	}

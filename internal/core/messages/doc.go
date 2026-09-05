@@ -13,6 +13,14 @@
 // here. An adapter that reads one drops it, the way it drops everything else
 // the port has no shape for.
 //
+// What a turn cost is the other side of that line and does cross it. Every
+// model worth reaching is metered the same way — so much read, so much written
+// — so a token count is a fact about the exchange rather than one vendor's
+// field, and it rides on the message as [Type.Usage] rather than becoming a
+// content block, because it is not something anybody said. A turn nobody
+// counted carries the zero count and says so. See
+// [github.com/ksahli/compadre/internal/core/usage].
+//
 // A reply arrives whole rather than as it is produced. [New] is the only way
 // to build a message, and the role it takes is a closed set — the values in
 // [github.com/ksahli/compadre/internal/core/roles] are the whole of what a
