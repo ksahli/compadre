@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ksahli/compadre/internal/core/failures"
 	"github.com/ksahli/compadre/internal/core/messages"
 	"github.com/ksahli/compadre/internal/core/roles"
 	"github.com/ksahli/compadre/internal/core/threads"
@@ -804,22 +805,28 @@ func TestInvokeRefusesANonReply(t *testing.T) {
 }
 
 func TestInvokeReportsFailure(t *testing.T) {
+	// settled says whether another attempt could go differently. Four of
+	// these are facts about how the run was set up and no prompt changes
+	// any of them; the rest are about this request and are worth asking
+	// again after, which is the distinction a session comes back to the
+	// prompt on.
 	cases := []struct {
-		name   string
-		status int
-		kind   string
-		want   error
+		name    string
+		status  int
+		kind    string
+		want    error
+		settled bool
 	}{
-		{"a request the API will not take", http.StatusBadRequest, "invalid_request_error", anthropic.ErrRequest},
-		{"credentials the API will not accept", http.StatusUnauthorized, "authentication_error", anthropic.ErrCredentials},
-		{"credentials not allowed to ask", http.StatusForbidden, "permission_error", anthropic.ErrPermission},
-		{"an account that cannot be billed", http.StatusForbidden, "billing_error", anthropic.ErrBilling},
-		{"a model the API does not know", http.StatusNotFound, "not_found_error", anthropic.ErrModel},
-		{"a request larger than the API takes", http.StatusRequestEntityTooLarge, "request_too_large", anthropic.ErrTooLarge},
-		{"requests turned away for now", http.StatusTooManyRequests, "rate_limit_error", anthropic.ErrRateLimited},
-		{"an API that could not answer", http.StatusInternalServerError, "api_error", anthropic.ErrUnavailable},
-		{"an API that is overloaded", 529, "overloaded_error", anthropic.ErrUnavailable},
-		{"a refusal this mapping has no shape for", http.StatusTeapot, "api_error", anthropic.ErrRefused},
+		{"a request the API will not take", http.StatusBadRequest, "invalid_request_error", anthropic.ErrRequest, false},
+		{"credentials the API will not accept", http.StatusUnauthorized, "authentication_error", anthropic.ErrCredentials, true},
+		{"credentials not allowed to ask", http.StatusForbidden, "permission_error", anthropic.ErrPermission, true},
+		{"an account that cannot be billed", http.StatusForbidden, "billing_error", anthropic.ErrBilling, true},
+		{"a model the API does not know", http.StatusNotFound, "not_found_error", anthropic.ErrModel, true},
+		{"a request larger than the API takes", http.StatusRequestEntityTooLarge, "request_too_large", anthropic.ErrTooLarge, false},
+		{"requests turned away for now", http.StatusTooManyRequests, "rate_limit_error", anthropic.ErrRateLimited, false},
+		{"an API that could not answer", http.StatusInternalServerError, "api_error", anthropic.ErrUnavailable, false},
+		{"an API that is overloaded", 529, "overloaded_error", anthropic.ErrUnavailable, false},
+		{"a refusal this mapping has no shape for", http.StatusTeapot, "api_error", anthropic.ErrRefused, false},
 	}
 
 	for _, c := range cases {
@@ -830,6 +837,9 @@ func TestInvokeReportsFailure(t *testing.T) {
 			replies, err := anthropic.New("", 0, options...).Invoke(context.Background(), thread, nil)
 			if !errors.Is(err, c.want) {
 				t.Errorf("Invoke() error = %v, want %v", err, c.want)
+			}
+			if got := errors.Is(err, failures.ErrSettled); got != c.settled {
+				t.Errorf("errors.Is(%v, ErrSettled) = %t, want %t", err, got, c.settled)
 			}
 			if len(replies) != 0 {
 				t.Errorf("replies = %q, want none", contents(replies))

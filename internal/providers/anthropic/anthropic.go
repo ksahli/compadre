@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ksahli/compadre/internal/core/failures"
 	"github.com/ksahli/compadre/internal/core/inference"
 	"github.com/ksahli/compadre/internal/core/messages"
 	"github.com/ksahli/compadre/internal/core/roles"
@@ -322,6 +323,15 @@ func refused(response *sdk.Message) error {
 // cancelled request still reaches the caller as [context.Canceled] and an
 // interrupt ends the exchange rather than being reported as something the API
 // did.
+//
+// Four of these are marked [failures.ErrSettled] and the rest are not, and the
+// line is whether a second attempt could go differently. Credentials the API
+// will not accept, an account it will not bill, a key without access and a
+// model it does not know are facts about how the run was set up: nothing that
+// happens at a prompt changes any of them, so asking again buys a second
+// identical refusal. A rate limit, an overloaded API and a request built wrong
+// are not marked, because the first two pass and the third is about the turn
+// rather than the run.
 func failed(err error) error {
 	var refusal *sdk.Error
 	if !errors.As(err, &refusal) {
@@ -332,14 +342,14 @@ func failed(err error) error {
 	case http.StatusBadRequest:
 		return ErrRequest
 	case http.StatusUnauthorized:
-		return ErrCredentials
+		return fmt.Errorf("%w (%w)", ErrCredentials, failures.ErrSettled)
 	case http.StatusForbidden:
 		if refusal.Type() == sdk.ErrorTypeBillingError {
-			return ErrBilling
+			return fmt.Errorf("%w (%w)", ErrBilling, failures.ErrSettled)
 		}
-		return ErrPermission
+		return fmt.Errorf("%w (%w)", ErrPermission, failures.ErrSettled)
 	case http.StatusNotFound:
-		return ErrModel
+		return fmt.Errorf("%w (%w)", ErrModel, failures.ErrSettled)
 	case http.StatusRequestEntityTooLarge:
 		return ErrTooLarge
 	case http.StatusTooManyRequests:

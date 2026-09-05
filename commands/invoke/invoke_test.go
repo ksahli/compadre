@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"github.com/ksahli/compadre/internal/core/tools/definitions"
 
 	"github.com/ksahli/compadre/internal/core/exchanges"
+	"github.com/ksahli/compadre/internal/core/failures"
 	"github.com/ksahli/compadre/internal/core/messages"
 	"github.com/ksahli/compadre/internal/core/roles"
 	"github.com/ksahli/compadre/internal/core/threads"
@@ -826,25 +828,54 @@ func TestSessionEndsOnACancelledContext(t *testing.T) {
 	}
 }
 
-// TestSessionEndsOnATurnThatFailed pins the third way out, which is the one
-// that is not quiet. A turn that failed comes back as an error and the session
-// stops there rather than asking again over a provider that has stopped
-// working — but what the turns before it said is still printed, and the
-// exchange still comes back carrying its id, because that is how the caller
-// picks the session back up with -exchange.
-func TestSessionEndsOnATurnThatFailed(t *testing.T) {
+// TestSessionCarriesOnAfterATurnThatFailed pins the point of the change. A
+// turn that failed is a turn that did not happen, not a session that is over:
+// what went wrong is said at the prompt and the next turn is asked for, the
+// same way an interrupted one is. Three turns go in, the second fails, and the
+// third is answered — which is the whole claim.
+func TestSessionCarriesOnAfterATurnThatFailed(t *testing.T) {
+	command, out, errs := session("why is the sky blue?\nand at sunset?\nand at noon?\n")
+	failing := &stumbling{model: answers("rayleigh scattering", "the sun is overhead"), on: 2, err: errors.New("the model is out")}
+	agent := agents.New(failing, definitions.New(), &recorder{id: "7"}, agents.Turns)
+
+	finished, err := command.session(context.Background(), agent, exchanges.Open(threads.New("")), nil)
+	if err != nil {
+		t.Fatalf("session() error = %v, want nil", err)
+	}
+	// All three lines were read, and the third was answered.
+	if got, want := len(failing.model.threads), 3; got != want {
+		t.Errorf("the model was asked %d times, want %d", got, want)
+	}
+	if got, want := out.String(), "rayleigh scattering\nthe sun is overhead\n"; got != want {
+		t.Errorf("session() printed %q, want %q", got, want)
+	}
+	// What went wrong is said where this program says everything about
+	// itself, so a session driven by a pipe does not find it in the answer.
+	if got, want := errs.String(), "the model is out"; !strings.Contains(got, want) {
+		t.Errorf("session() said %q on stderr, want it to name %q", got, want)
+	}
+	if got, want := finished.ID(), "7"; got != want {
+		t.Errorf("session().ID() = %q, want %q", got, want)
+	}
+}
+
+// TestSessionEndsOnASettledFailure pins the exception. Coming back to the
+// prompt is only worth doing when the next turn could go differently, and a
+// failure the core has marked settled says it cannot: the session ends and the
+// error comes back, so the id is printed and the exchange is picked up with
+// -exchange once whatever it was has been put right.
+func TestSessionEndsOnASettledFailure(t *testing.T) {
 	command, out, _ := session("why is the sky blue?\nand at sunset?\nand at noon?\n")
-	// One reply, so the provider answers the first turn and refuses the
-	// second.
-	failing := &turning{model: answers("rayleigh scattering"), err: errors.New("the model is out")}
+	settled := fmt.Errorf("%w: the API would not accept the credentials", failures.ErrSettled)
+	failing := &turning{model: answers("rayleigh scattering"), err: settled}
 	agent := agents.New(failing, definitions.New(), &recorder{id: "7"}, agents.Turns)
 
 	finished, err := command.session(context.Background(), agent, exchanges.Open(threads.New("")), nil)
 	if err == nil {
 		t.Fatal("session() error = nil, want an error")
 	}
-	if got, want := err.Error(), "the model is out"; !strings.Contains(got, want) {
-		t.Errorf("session() error = %q, want it to name %q", got, want)
+	if !errors.Is(err, failures.ErrSettled) {
+		t.Errorf("session() error = %v, want it to be settled", err)
 	}
 	if got, want := out.String(), "rayleigh scattering\n"; got != want {
 		t.Errorf("session() printed %q, want %q", got, want)
@@ -855,6 +886,35 @@ func TestSessionEndsOnATurnThatFailed(t *testing.T) {
 	}
 	if got, want := finished.ID(), "7"; got != want {
 		t.Errorf("session().ID() = %q, want %q", got, want)
+	}
+}
+
+// TestSessionEndsOnAStoreThatCannotWrite pins the other settled one, and the
+// reason it is settled at all. A session that came back to the prompt from
+// this would go on answering while nothing was being written down, which is a
+// session quietly losing the turns it is still taking.
+func TestSessionEndsOnAStoreThatCannotWrite(t *testing.T) {
+	command, out, _ := session("why is the sky blue?\nand at sunset?\n")
+	provider := answers("rayleigh scattering")
+	agent := agents.New(provider, definitions.New(), wedged{}, agents.Turns)
+
+	_, err := command.session(context.Background(), agent, exchanges.Open(threads.New("")), nil)
+	if err == nil {
+		t.Fatal("session() error = nil, want an error")
+	}
+	if !errors.Is(err, failures.ErrSettled) {
+		t.Errorf("session() error = %v, want it to be settled", err)
+	}
+	if got, want := err.Error(), "could not keep the record"; !strings.Contains(got, want) {
+		t.Errorf("session() error = %q, want it to name %q", got, want)
+	}
+	// The record is written before the model is asked anything, so the
+	// turn never got as far as a round trip and nothing was said.
+	if got, want := len(provider.threads), 0; got != want {
+		t.Errorf("the model was asked %d times, want %d", got, want)
+	}
+	if got := out.String(); got != "" {
+		t.Errorf("session() printed %q, want nothing", got)
 	}
 }
 
@@ -1122,4 +1182,39 @@ func (a *announcing) Write(p []byte) (int, error) {
 
 func (a *announcing) String() string {
 	return a.written.String()
+}
+
+// stumbling is a provider that fails one turn and answers the rest: the nth
+// call it is handed comes back as the error and every other goes to the model
+// behind it. It is how a case says "the second turn goes wrong and the third
+// is fine", which [turning] cannot, since it only ever fails from some point
+// on.
+type stumbling struct {
+	model *model
+	on    int
+	err   error
+	calls int
+}
+
+func (s *stumbling) Invoke(ctx Context, thread threads.Type, registry tools.Registry) ([]messages.Type, error) {
+	s.calls++
+	if s.calls == s.on {
+		s.model.threads = append(s.model.threads, thread)
+		return nil, s.err
+	}
+	return s.model.Invoke(ctx, thread, registry)
+}
+
+// wedged is a store that cannot write, standing in for the disk going away
+// mid-conversation. The failure it produces is the agent's, not this type's:
+// what a case built on it is pinning is that a record which is not being kept
+// ends the session.
+type wedged struct{}
+
+func (wedged) Save(Context, Exchange) (Exchange, error) {
+	return Exchange{}, errors.New("there is nowhere to write it")
+}
+
+func (wedged) Load(Context, string) (Exchange, error) {
+	return Exchange{}, errors.New("not asked for here")
 }

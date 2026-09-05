@@ -40,6 +40,16 @@
 // a way out rather than acted on and a second one takes it — the session ends,
 // the same as the end of input.
 //
+// A turn that failed is the same shape, and for the same reason: with -message
+// it is the end of the run, and in a session it is the end of the turn. What
+// went wrong is said at the prompt and the next turn is asked for, since a
+// rate limit or a reply cut off at the ceiling says nothing about whether the
+// turn after it can be answered. The failures that do say something are marked
+// [failures.ErrSettled] by whichever adapter met them — credentials the API
+// will not take, a model it does not know, a record that cannot be written —
+// and those end the session, because coming back to the prompt from one would
+// be offering a turn that is certain to fail the same way.
+//
 // Opening the exchange has two shapes of its own, and they cross with the
 // first two rather than doubling them. Without -exchange it is a new one,
 // opened with the instructions given here. With one it is the exchange filed
@@ -71,6 +81,7 @@ import (
 
 	"github.com/ksahli/compadre/internal/core/agents"
 	"github.com/ksahli/compadre/internal/core/exchanges"
+	"github.com/ksahli/compadre/internal/core/failures"
 	"github.com/ksahli/compadre/internal/core/memory"
 	"github.com/ksahli/compadre/internal/core/messages"
 	"github.com/ksahli/compadre/internal/core/roles"
@@ -232,18 +243,37 @@ func (c *Command) Execute(ctx Context) error {
 // Anything typed in between disarms that, a blank line included: a caller who
 // went back to talking is not a caller halfway through quitting.
 //
+// A turn that failed is not the end of one either, and for the same reason an
+// interrupt is not. A rate limit, an overloaded API, a reply cut off at the
+// ceiling, a model that declined, an exchange that outgrew the context window,
+// a run that gave up after -max-turns — each of those is a turn that did not
+// happen, in a session perfectly able to take the next one. So what went wrong
+// is said and the prompt comes back, and the exchange carried on with is the
+// one that came back from the failure: whatever the turn got as far as saying
+// is in it, and a call it left hanging is answered on the way into the turn
+// after it.
+//
+// The exception is a failure marked [failures.ErrSettled], which is the core's
+// word for one that a second attempt cannot change: credentials the API will
+// not take, an account it will not bill, a key without access, a model it does
+// not know, and a store that cannot be written to. Coming back to the prompt
+// from one of those offers the caller a turn that is certain to fail the same
+// way, or — for the store — a session that goes on answering while nothing is
+// written down. The session ends instead, with the record holding everything
+// up to it and the id about to be printed, so it is picked back up with
+// -exchange once whatever it was has been put right.
+//
 // The end comes four ways and they are not the same. Stdin running out is the
 // end of a session that said everything it had to say, and so is a second
 // interrupt at the prompt and a cancelled context — the last is the process
-// being told to go down, which is not a thing a session can decline. A turn
-// that failed is the third, and it comes back as an error: the record has
-// everything up to it and the id is about to be printed, so the session is
-// picked up with -exchange rather than carried on over a provider or a store
-// that has stopped working. Stdin itself failing is the fourth and comes back
-// as an error too, for the reason the two must not be confused: a reader that
-// broke halfway through a line has swallowed a turn somebody typed, and
-// reporting that as a session that ended would be reporting a lost turn as a
-// job well done.
+// being told to go down, which is not a thing a session can decline. A settled
+// failure is the third. Stdin itself failing is the fourth and comes back as
+// an error too, for the reason it must not be confused with the first: a
+// reader that broke halfway through a line has swallowed a turn somebody
+// typed, and reporting that as a session that ended would be reporting a lost
+// turn as a job well done. There is no prompt to come back to when there is
+// nothing left to read from, which is what keeps this one an ending while a
+// failed turn is not.
 func (c *Command) session(ctx Context, agent Agent, exchange Exchange, interrupts <-chan os.Signal) (Exchange, error) {
 	lines := listen(c.in)
 	armed := false
@@ -292,7 +322,11 @@ func (c *Command) session(ctx Context, agent Agent, exchange Exchange, interrupt
 				fmt.Fprintln(c.errs, "interrupted")
 				continue
 			}
-			return finished, err
+			if errors.Is(err, failures.ErrSettled) {
+				return finished, err
+			}
+			fmt.Fprintln(c.errs, err)
+			continue
 		}
 	}
 }

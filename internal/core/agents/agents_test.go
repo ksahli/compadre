@@ -10,6 +10,7 @@ import (
 
 	"github.com/ksahli/compadre/internal/core/agents"
 	"github.com/ksahli/compadre/internal/core/exchanges"
+	"github.com/ksahli/compadre/internal/core/failures"
 	"github.com/ksahli/compadre/internal/core/messages"
 	"github.com/ksahli/compadre/internal/core/roles"
 	"github.com/ksahli/compadre/internal/core/threads"
@@ -326,6 +327,12 @@ func TestConverseStopsAtTheCeiling(t *testing.T) {
 			if provider.calls() != c.asked {
 				t.Errorf("provider was asked %d times, want %d", provider.calls(), c.asked)
 			}
+			// And it is not settled. A run that spent its turns on
+			// tools says nothing about the next question, which a
+			// shorter one may well finish inside the same bound.
+			if errors.Is(err, failures.ErrSettled) {
+				t.Errorf("Converse() error = %v, want it not to be settled", err)
+			}
 		})
 	}
 }
@@ -480,6 +487,12 @@ func TestConverseStopsWhenTheRecordCannotBeKept(t *testing.T) {
 		if !errors.Is(err, full) {
 			t.Fatalf("Converse() error = %v, want %v", err, full)
 		}
+		// And it is settled: a caller driving turns has nothing to
+		// gain by asking for another one over a store that cannot
+		// write, since the turns it took would go nowhere.
+		if !errors.Is(err, failures.ErrSettled) {
+			t.Errorf("Converse() error = %v, want it to be settled", err)
+		}
 		// The model was never asked: there was nowhere to put the
 		// answer before there was a question to spend on.
 		if provider.calls() != 0 {
@@ -500,6 +513,9 @@ func TestConverseStopsWhenTheRecordCannotBeKept(t *testing.T) {
 		finished, err := agents.New(provider, registry(), kept, agents.Turns).Converse(context.Background(), unfiled())
 		if !errors.Is(err, full) {
 			t.Fatalf("Converse() error = %v, want %v", err, full)
+		}
+		if !errors.Is(err, failures.ErrSettled) {
+			t.Errorf("Converse() error = %v, want it to be settled", err)
 		}
 		if kept.writes() != 2 {
 			t.Errorf("the store was asked to write %d times, want 2", kept.writes())

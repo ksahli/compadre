@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/ksahli/compadre/internal/core/exchanges"
+	"github.com/ksahli/compadre/internal/core/failures"
 	"github.com/ksahli/compadre/internal/core/inference"
 	"github.com/ksahli/compadre/internal/core/memory"
 	"github.com/ksahli/compadre/internal/core/messages"
@@ -216,10 +217,17 @@ func repaired(exchange Exchange) Exchange {
 // What that costs is a turn that cannot be interrupted while the store is
 // wedged. The store is a local database with a busy timeout on it, so the wait
 // is bounded, and a bounded wait is worth a record that is always whole.
+//
+// The failure is marked [failures.ErrSettled], which is how "ends the run"
+// reaches a caller that is driving turns rather than running one. A session
+// that came back to the prompt from this would go on answering while nothing
+// was being written down, which is a session quietly losing the turns it is
+// still taking. The ceiling at the end of [Type.Converse] is deliberately not
+// marked: a shorter question may well finish inside it.
 func (a Type) save(ctx Context, exchange Exchange) (Exchange, error) {
 	saved, err := a.store.Save(context.WithoutCancel(ctx), exchange)
 	if err != nil {
-		return exchange, fmt.Errorf("could not keep the record of the exchange: %w", err)
+		return exchange, fmt.Errorf("could not keep the record of the exchange: %w (%w)", err, failures.ErrSettled)
 	}
 	return saved, nil
 }

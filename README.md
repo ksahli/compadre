@@ -41,6 +41,14 @@ Early. What works today:
   the model is being waited on abandons that reply and asks again, with
   everything said so far still in the exchange. The way out is the end of the
   input, or two Ctrl-Cs in a row at the prompt
+- a turn that failed in a session ends the turn and not the session either:
+  what went wrong is said at the prompt and the next turn is asked for, so a
+  rate limit, an overloaded API or a reply cut off at the ceiling costs a turn
+  rather than a conversation. The exceptions are the failures nothing typed at
+  a prompt can change — credentials the API will not take, an account it will
+  not bill, a key without access, a model it does not know, and a record that
+  cannot be written — which end the session, with the id printed so it is
+  picked back up with `-exchange`
 - what the run is bounded by, on the command line: `-model` and `-max-tokens`
   for the model to reach and how much of a reply it may write, `-workspace` for
   the directory the file tools may see, and `-max-turns` for how many turns one
@@ -66,6 +74,7 @@ internal/core/inference  the port a model is reached through
 internal/core/exchanges  a thread and the id it is filed under
 internal/core/memory     the port an exchange is kept through
 internal/core/tools      what a tool is, in the core's own terms
+internal/core/failures   the word for a failure worth giving up on
 internal/core/agents     the loop that runs an exchange to its end
 internal/providers/…     adapters implementing the inference port
 internal/stores/…        adapters implementing the memory port
